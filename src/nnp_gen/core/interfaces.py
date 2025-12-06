@@ -1,9 +1,12 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 import logging
+import hashlib
 import numpy as np
-from ase import Atoms
-from nnp_gen.core.config import SystemConfig, AppConfig
+from ase import Atoms, units
+from ase.geometry import get_distances
+from ase.neighborlist import neighbor_list
+from nnp_gen.core.config import SystemConfig
 from nnp_gen.core.physics import (
     apply_rattle,
     apply_volumetric_strain,
@@ -12,6 +15,7 @@ from nnp_gen.core.physics import (
 )
 from nnp_gen.core.exceptions import GenerationError
 from nnp_gen.core.models import StructureMetadata
+from nnp_gen.core.validation import StructureValidator
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +26,7 @@ class BaseGenerator(ABC):
 
     def __init__(self, config: SystemConfig):
         self.config = config
+        self.validator = StructureValidator(config.constraints)
 
     def generate(self) -> List[Atoms]:
         """
@@ -47,30 +52,34 @@ class BaseGenerator(ABC):
             # Pipeline Logic
 
             # Seed for this structure's random operations
-            # We use a simple integer derived from index to ensure reproducibility given the same input list
-            struct_seed = i
+            # We use a deterministic seed based on structure hash + index to ensure reproducibility and robustness.
+            # We use sha256 because Python's hash() is randomized across runs (PYTHONHASHSEED).
+            seed_str = f"{atoms.get_chemical_formula()}_{i}"
+            seed_hash = hashlib.sha256(seed_str.encode('utf-8')).hexdigest()
+            struct_seed = int(seed_hash, 16) % (2**32)
 
-            # 0. Enforce PBC from config (Crucial for ensure_supercell checks)
+            # 0. Enforce PBC from config
             atoms.set_pbc(self.config.pbc)
 
-            # 1. ensure_supercell_size
+            # 1. set_initial_magmoms (if applicable)
+            if hasattr(self.config, 'default_magmoms') and self.config.default_magmoms:
+                atoms = set_initial_magmoms(atoms, self.config.default_magmoms)
+
+            # 2. apply_volumetric_strain (Moved BEFORE ensure_supercell_size)
+            if self.config.vol_scale_range:
+                atoms = apply_volumetric_strain(atoms, self.config.vol_scale_range, seed=struct_seed)
+
+            # 3. apply_rattle (Moved BEFORE ensure_supercell_size)
+            if self.config.rattle_std > 0:
+                atoms = apply_rattle(atoms, self.config.rattle_std, seed=struct_seed)
+
+            # 4. ensure_supercell_size
+            # Now we check supercell size on the potentially strained/rattled cell
             atoms = ensure_supercell_size(
                 atoms,
                 r_cut=self.config.constraints.r_cut,
                 factor=self.config.constraints.min_cell_length_factor
             )
-
-            # 2. set_initial_magmoms (if applicable)
-            if hasattr(self.config, 'default_magmoms') and self.config.default_magmoms:
-                atoms = set_initial_magmoms(atoms, self.config.default_magmoms)
-
-            # 3. apply_volumetric_strain
-            if self.config.vol_scale_range:
-                atoms = apply_volumetric_strain(atoms, self.config.vol_scale_range, seed=struct_seed)
-
-            # 4. apply_rattle
-            if self.config.rattle_std > 0:
-                atoms = apply_rattle(atoms, self.config.rattle_std, seed=struct_seed)
 
             # 5. validate_structure
             if self.validate_structure(atoms):
@@ -91,51 +100,9 @@ class BaseGenerator(ABC):
     def validate_structure(self, atoms: Atoms) -> bool:
         """
         Validates a single structure against constraints.
+        Delegates to StructureValidator.
         """
-        constraints = self.config.constraints
-
-        # 1. Max Atoms
-        if len(atoms) > constraints.max_atoms:
-            logger.warning(f"Validation Failed: {len(atoms)} atoms > max {constraints.max_atoms}")
-            return False
-
-        # 2. Min Distance
-        # self-interaction=False (don't check distance to self)
-        # mic=True (minimum image convention) if pbc is True
-        # Note: get_all_distances with mic=True can be slow for large systems but for <200 atoms it's fast.
-        if len(atoms) > 1:
-            # We use mic=True if any PBC is set
-            try:
-                dists = atoms.get_all_distances(mic=any(atoms.pbc))
-                # Set diagonal to infinity to ignore self-distance
-                np.fill_diagonal(dists, np.inf)
-                min_dist = np.min(dists)
-
-                if min_dist < constraints.min_distance:
-                    logger.warning(f"Validation Failed: Min distance {min_dist:.2f} < {constraints.min_distance}")
-                    return False
-            except Exception as e:
-                logger.warning(f"Validation Error during distance check: {e}")
-                # Fail safe? Or reject?
-                return False
-
-        # 3. Min Density
-        try:
-            vol = atoms.get_volume()
-            if vol > 1e-6: # Avoid div by zero
-                # sum of masses
-                total_mass = sum(atoms.get_masses()) # amu
-                # 1 amu/A^3 = 1.66053906660 g/cm^3
-                density = (total_mass / vol) * 1.66053906660
-
-                if density < constraints.min_density:
-                     logger.warning(f"Validation Failed: Density {density:.2f} < {constraints.min_density}")
-                     return False
-        except Exception:
-            # get_volume might fail for non-periodic systems or if cell is zero
-            pass
-
-        return True
+        return self.validator.validate(atoms)
 
 class IExplorer(ABC):
     """Interface for exploration methods (e.g., MD)."""
