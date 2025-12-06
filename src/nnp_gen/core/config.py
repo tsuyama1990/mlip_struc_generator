@@ -1,7 +1,10 @@
 from typing import Literal, Union, List, Dict, Optional, Tuple, Any
 import numpy as np
+import logging
 from enum import Enum
 from pydantic import BaseModel, Field, model_validator, field_validator
+
+logger = logging.getLogger(__name__)
 
 # --- System Configuration ---
 
@@ -33,8 +36,10 @@ class BaseSystemConfig(BaseModel):
     @field_validator('rattle_std')
     @classmethod
     def validate_rattle_std(cls, v: float) -> float:
-        if not (0.0 <= v <= 0.5):
-            raise ValueError(f"rattle_std must be between 0.0 and 0.5 Angstrom, got {v}")
+        if v < 0.0 or v > 1.0:
+            raise ValueError(f"rattle_std must be between 0.0 and 1.0 Angstrom, got {v}")
+        if v > 0.5:
+            logger.warning(f"High rattle_std ({v} A) detected. This may break bonds in fragile molecules.")
         return v
 
     @field_validator('vol_scale_range')
@@ -206,6 +211,8 @@ class ExplorationConfig(BaseModel):
     def validate_temperature(cls, v: float) -> float:
         if v <= 0:
             raise ValueError("Temperature must be positive")
+        if v >= 10000:
+            raise ValueError("Temperature must be less than 10000 K")
         return v
 
     @field_validator('steps')
@@ -218,8 +225,8 @@ class ExplorationConfig(BaseModel):
     @field_validator('timestep')
     @classmethod
     def validate_timestep(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError("Timestep must be positive")
+        if v <= 0.1:
+            raise ValueError("Timestep must be greater than 0.1 fs")
         return v
 
 # --- Sampling Configuration ---

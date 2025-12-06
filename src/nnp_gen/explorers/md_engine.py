@@ -1,6 +1,7 @@
 import logging
 import concurrent.futures
 import numpy as np
+import time
 from typing import List, Optional, Dict, Any
 from ase import Atoms
 from ase.md.langevin import Langevin
@@ -10,20 +11,14 @@ from ase.data import covalent_radii
 from tqdm import tqdm
 from nnp_gen.core.interfaces import IExplorer
 import psutil
-import os
-import signal
 import multiprocessing
 import queue
-import threading
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 class MDTimeoutError(Exception):
     pass
-
-def timeout_handler(signum, frame):
-    raise MDTimeoutError("MD Simulation timed out.")
 
 def _get_calculator(model_name: str, device: str):
     """
@@ -32,9 +27,13 @@ def _get_calculator(model_name: str, device: str):
     """
     try:
         import torch
-        # Force single thread for process parallelism
-        torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
+        try:
+            # Force single thread for process parallelism
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+        except RuntimeError as e:
+            logger.debug(f"Could not set torch threads (already initialized): {e}")
+
     except ImportError:
         pass
 
@@ -106,23 +105,7 @@ def run_single_md_thread(
     Run a single MD trajectory using a calculator from the pool.
     Designed for ThreadPoolExecutor.
     """
-    # Signal handling for timeout works in main thread only.
-    # For threads, we can't use signal.alarm effectively per thread.
-    # We rely on total job timeout or manual checks?
-    # Or strict step limits.
-    # The prompt asked for timeout using signal. That implies Process based or single thread.
-    # If we switch to Threads for Pool, we lose signal-based timeout per task.
-    # However, "Issue: Loading ML models... for every thread is inefficient."
-    # If we use Threads, we MUST share calculators.
-    # If we use Processes, we can't share calculators via Queue easily.
-    # So assuming ThreadPoolExecutor.
-    # Timeout in threads: We can check time in the loop.
-
-    import time
     start_time = time.time()
-    # Setup timeout
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(timeout_seconds)
 
     try:
         with calc_pool.get_calculator() as calc:
@@ -169,6 +152,9 @@ def run_single_md_thread(
             # Initial check
             step_check()
 
+            # Execute simulation in a loop to allow periodic timeout checks
+            # dyn.run(steps) is blocking, so we split it into smaller chunks (e.g., 1 step or small batch)
+            # For simplicity and safety, running 1 step at a time inside our loop gives max control.
             for i in range(steps):
                 dyn.run(1)
                 step_check()
@@ -193,8 +179,6 @@ def run_single_md_thread(
     except Exception as e:
         logger.error(f"MD Exploration Error: {e}")
         return None
-    finally:
-        signal.alarm(0)  # Cancel alarm
 
 def _calculate_max_workers(n_atoms_estimate: int = 1000) -> int:
     """
@@ -249,7 +233,7 @@ class MDExplorer(IExplorer):
             futures = []
             for seed in seeds:
                 futures.append(
-                    executor.submit(run_single_md_thread, seed, temp, steps, interval, pool, 3600)
+                    executor.submit(run_single_md_thread, seed, temp, steps, interval, pool, {}, 3600)
                 )
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(seeds), desc="MD Exploration"):
