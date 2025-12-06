@@ -162,20 +162,27 @@ class VizViewModel(param.Parameterized):
         X = np.array(descriptors)
         X = np.nan_to_num(X)
 
+        # Capture current token
+        token = self.current_db_path
+
         # Submit to executor
-        future = self.ui_executor.submit(self._run_pca, X, valid_indices)
+        future = self.ui_executor.submit(self._run_pca, X, valid_indices, token)
         future.add_done_callback(self._on_pca_complete)
 
-    def _run_pca(self, X, valid_indices):
+    def _run_pca(self, X, valid_indices, token):
         """Runs in worker thread."""
         pca = PCA(n_components=2)
         coords = pca.fit_transform(X)
-        return coords, valid_indices
+        return coords, valid_indices, token
 
     def _on_pca_complete(self, future):
         """Callback when PCA is done."""
         try:
-            coords, valid_indices = future.result()
+            coords, valid_indices, token = future.result()
+
+            # CRITICAL CHECK: Discard result if user has switched DBs
+            if token != self.current_db_path:
+                return
 
             # Schedule UI update on main thread/loop
             if pn.state.curdoc:
