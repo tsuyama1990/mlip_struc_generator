@@ -4,6 +4,7 @@ from nnp_gen.generators.alloy import AlloyGenerator
 from nnp_gen.generators.ionic import IonicGenerator
 from nnp_gen.generators.covalent import CovalentGenerator
 from nnp_gen.generators.molecule import MoleculeGenerator
+from nnp_gen.generators.interface import InterfaceGenerator
 
 class GeneratorFactory:
     """
@@ -31,5 +32,7 @@ class GeneratorFactory:
             return CovalentGenerator(config)
         elif config.type == "molecule":
             return MoleculeGenerator(config)
+        elif config.type == "interface":
+            return InterfaceGenerator(config)
         else:
             raise ValueError(f"Unknown system type: {config.type}")
