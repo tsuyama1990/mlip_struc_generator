@@ -124,7 +124,8 @@ def test_pbc_enforcement():
         constraints=PhysicsConstraints(min_cell_length_factor=0.0, r_cut=1.0)
     )
 
-    atoms_wrong = Atoms('Cu', pbc=[False, False, False])
+    # Must provide cell for volume calculation if pbc is True, otherwise ensure_supercell_size might fail
+    atoms_wrong = Atoms('Cu', pbc=[False, False, False], cell=[3,3,3])
 
     gen_alloy = MockGenerator(config_alloy, [atoms_wrong.copy()])
     res_alloy = gen_alloy.generate()

@@ -47,6 +47,63 @@ def test_ensure_supercell_size_logic():
     supercell_large = ensure_supercell_size(atoms_large, r_cut=5.0, factor=1.0)
     assert len(supercell_large) == 1
 
+def test_ensure_supercell_triclinic():
+    """
+    Test supercell expansion for triclinic cell where vector length > r_cut
+    but perpendicular width < r_cut.
+    """
+    # Create a highly skewed cell
+    # a = [10, 0, 0] (|a|=10)
+    # b = [5, 8.66, 0] (|b|=10)
+    # c = [9, 0, 1] (|c| ~ 9.05)
+    # The height in z-direction is 1.0, which is < r_cut=5.0
+
+    cell = [[10.0, 0.0, 0.0],
+            [5.0, 8.66, 0.0],
+            [9.0, 0.0, 1.0]]
+
+    atoms = Atoms('H', cell=cell, pbc=True)
+    r_cut = 5.0
+
+    # Check initial geometry
+    # Lengths are large enough
+    assert np.linalg.norm(cell[0]) >= r_cut
+    assert np.linalg.norm(cell[1]) >= r_cut
+    assert np.linalg.norm(cell[2]) >= r_cut
+
+    # But height perpendicular to ab plane is 1.0
+    vol = atoms.get_volume() # 10 * 8.66 * 1 = 86.6
+    # Area of ab face = |a x b| = 10 * 8.66 = 86.6
+    # h_c = vol / area = 1.0
+
+    supercell = ensure_supercell_size(atoms, r_cut=r_cut)
+
+    # We expect expansion in c direction
+    # r_cut=5, h=1 -> need 5x expansion
+
+    sc_cell = supercell.cell.array
+    # Calculate new heights
+    sc_vol = abs(supercell.get_volume())
+
+    # New height in c direction (approx)
+    # The supercell matrix should be repeat * cell
+    # If repeat is [1, 1, 5], then new c vector is 5*c = [45, 0, 5]. Height is 5.
+
+    # Check that we have enough atoms
+    # original 1 atom. if repeat is [1,1,5], we expect 5 atoms.
+    assert len(supercell) >= 5
+
+    # Verify strict height condition
+    v = sc_cell
+    areas = [
+        np.linalg.norm(np.cross(v[1], v[2])),
+        np.linalg.norm(np.cross(v[0], v[2])),
+        np.linalg.norm(np.cross(v[0], v[1]))
+    ]
+    heights = [sc_vol / a for a in areas]
+
+    assert np.all(np.array(heights) >= r_cut - 1e-4)
+
 def test_rattle_reproducibility():
     """Test that apply_rattle is reproducible with seed."""
     atoms1 = Atoms('H', positions=[[0,0,0]])

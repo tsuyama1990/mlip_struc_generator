@@ -131,14 +131,19 @@ def test_importerror_when_modules_missing(mocker):
         "rdkit.Chem": None
     })
 
+    from nnp_gen.core.exceptions import GenerationError
+
     # Covalent
     config_cov = CovalentSystemConfig(elements=["C"], type="covalent")
     gen_cov = CovalentGenerator(config_cov)
-    with pytest.raises(ImportError):
+    # Wrapped in GenerationError now
+    with pytest.raises(GenerationError) as excinfo:
         gen_cov.generate()
+    assert "pyxtal is required" in str(excinfo.value)
 
     # Molecule
     config_mol = MoleculeSystemConfig(elements=["H"], smiles="H2", type="molecule")
     gen_mol = MoleculeGenerator(config_mol)
-    with pytest.raises(ImportError):
+    with pytest.raises(GenerationError) as excinfo:
         gen_mol.generate()
+    assert "rdkit is required" in str(excinfo.value)
