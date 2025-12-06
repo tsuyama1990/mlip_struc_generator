@@ -8,7 +8,7 @@ class PhysicsConstraints(BaseModel):
     max_atoms: int = Field(200, description="Hard limit for total number of atoms")
     min_density: float = Field(0.0, description="Minimum density (g/cm^3)")
     min_distance: float = Field(0.5, description="Minimum distance between atoms (Angstrom)")
-    min_cell_length_factor: float = Field(1.0, description="Minimum cell length relative to r_cut")
+    min_cell_length_factor: float = Field(2.0, description="Minimum cell length relative to r_cut")
     r_cut: float = Field(5.0, description="Cutoff radius of the potential model")
 
 class BaseSystemConfig(BaseModel):
@@ -25,12 +25,26 @@ class IonicSystemConfig(BaseSystemConfig):
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
     default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")
 
+    @model_validator(mode='after')
+    def check_max_atoms(self):
+        vol_factor = self.supercell_size[0] * self.supercell_size[1] * self.supercell_size[2]
+        if vol_factor > self.constraints.max_atoms:
+            raise ValueError(f"Supercell expansion {self.supercell_size} results in at least {vol_factor} atoms, exceeding max_atoms={self.constraints.max_atoms}")
+        return self
+
 class AlloySystemConfig(BaseSystemConfig):
     type: Literal["alloy"] = "alloy"
     lattice_constant: Optional[float] = Field(None, description="Approximate lattice constant")
     spacegroup: Optional[int] = Field(None, description="Target spacegroup number (1-230)")
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
     default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")
+
+    @model_validator(mode='after')
+    def check_max_atoms(self):
+        vol_factor = self.supercell_size[0] * self.supercell_size[1] * self.supercell_size[2]
+        if vol_factor > self.constraints.max_atoms:
+            raise ValueError(f"Supercell expansion {self.supercell_size} results in at least {vol_factor} atoms, exceeding max_atoms={self.constraints.max_atoms}")
+        return self
 
 class CovalentSystemConfig(BaseSystemConfig):
     type: Literal["covalent"] = "covalent"

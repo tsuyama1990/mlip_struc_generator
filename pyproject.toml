@@ -10,15 +10,22 @@ authors = [
   { name = "Jules", email = "jules@example.com" },
 ]
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10"
 dependencies = [
-    "pydantic>=2.0,<3.0",
+    "pydantic>=2.0",
     "hydra-core",
-    "ase>=3.22,<4.0",
-    "numpy>=1.24,<2.0",
+    "ase",
+    "numpy",
     "tqdm",
-    "scipy>=1.10,<2.0",
-    "torch"
+    "scipy",
+    # Heavy scientific libraries (listed but strictly treated as optional/mocked for now)
+    "pymatgen",
+    "pyxtal",
+    "icet",
+    "rdkit",
+    "matgl",
+    "chgnet",
+    "dscribe"
 ]
 
 [project.optional-dependencies]
@@ -26,10 +33,9 @@ dev = [
     "pytest",
     "pytest-mock"
 ]
-ionic = ["pymatgen"]
-alloy = ["icet"]
-covalent = ["pyxtal"]
-molecule = ["rdkit"]
-ml-calculators = ["mace-torch", "sevenn", "matgl", "chgnet"]
-descriptors = ["dscribe"]
-all = ["pymatgen", "icet", "pyxtal", "rdkit", "mace-torch", "sevenn", "matgl", "chgnet", "dscribe"]
+gui = [
+    "panel",
+    "plotly",
+    "pyyaml",
+    "pydantic"
+]

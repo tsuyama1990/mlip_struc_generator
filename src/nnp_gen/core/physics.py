@@ -3,52 +3,27 @@ from typing import Dict, Tuple, List, Optional
 from ase import Atoms
 from math import ceil
 
-def apply_rattle(atoms: Atoms, std: float, seed: Optional[int] = None) -> Atoms:
+def apply_rattle(atoms: Atoms, std: float) -> Atoms:
     """
     Apply Gaussian noise to atomic positions.
 
     Args:
         atoms (Atoms): The atoms object to modify.
         std (float): Standard deviation of the Gaussian noise in Angstroms.
-        seed (Optional[int]): Random seed for reproducibility.
 
     Returns:
         Atoms: The modified atoms object (in-place modification but returned for chaining).
     """
-    # ASE's atoms.rattle(seed=...) expects an int or None, it creates its own RandomState internally.
-    # Passing a RandomState object causes TypeError in recent numpy/ASE versions.
-    atoms.rattle(stdev=std, seed=seed)
+    atoms.rattle(stdev=std, seed=None)
     return atoms
 
-def apply_strain_tensor(atoms: Atoms, strain_tensor: np.ndarray) -> Atoms:
-    """
-    Apply general strain tensor (3x3) to cell.
-
-    Args:
-        atoms (Atoms): The atoms object.
-        strain_tensor (np.ndarray): 3x3 strain tensor.
-
-    Returns:
-        Atoms: Modified atoms object.
-    """
-    if atoms.cell is None:
-        return atoms
-
-    F = np.eye(3) + strain_tensor  # Deformation gradient
-    # atoms.cell is 3x3 array of lattice vectors (rows)
-    # New lattice vectors = Old lattice vectors * F^T
-    new_cell = atoms.cell.array @ F.T
-    atoms.set_cell(new_cell, scale_atoms=True)
-    return atoms
-
-def apply_volumetric_strain(atoms: Atoms, scale_range: List[float], seed: Optional[int] = None) -> Atoms:
+def apply_volumetric_strain(atoms: Atoms, scale_range: List[float]) -> Atoms:
     """
     Apply isotropic strain to the unit cell.
 
     Args:
         atoms (Atoms): The atoms object to modify.
         scale_range (List[float]): [min, max] scaling factors (linear scale).
-        seed (Optional[int]): Random seed.
 
     Returns:
         Atoms: The modified atoms object.
@@ -56,10 +31,14 @@ def apply_volumetric_strain(atoms: Atoms, scale_range: List[float], seed: Option
     if len(scale_range) != 2:
         raise ValueError("scale_range must be a list of 2 floats [min, max]")
 
-    rng = np.random.RandomState(seed)
-    s = rng.uniform(scale_range[0], scale_range[1])
+    s = np.random.uniform(scale_range[0], scale_range[1])
 
+    # Check if cell exists and is not zero
     if atoms.cell is None or np.all(atoms.cell == 0):
+        # Can't scale zero cell or non-periodic without cell?
+        # But instructions say use set_cell(cell * s).
+        # If no cell, this operation is meaningless or effectively scales positions if scale_atoms=True?
+        # ASE set_cell with scale_atoms=True on vacuum structure just scales positions?
         pass
     else:
         new_cell = atoms.get_cell() * s
@@ -89,14 +68,14 @@ def set_initial_magmoms(atoms: Atoms, magmom_map: Dict[str, float]) -> Atoms:
     atoms.set_initial_magnetic_moments(magmoms)
     return atoms
 
-def ensure_supercell_size(atoms: Atoms, r_cut: float, factor: float = 1.0) -> Atoms:
+def ensure_supercell_size(atoms: Atoms, r_cut: float, factor: float = 2.0) -> Atoms:
     """
     Expand the unit cell to be at least r_cut * factor in all dimensions.
 
     Args:
         atoms (Atoms): The atoms object.
         r_cut (float): Cutoff radius.
-        factor (float): Factor to multiply r_cut by (default 1.0).
+        factor (float): Factor to multiply r_cut by (default 2.0).
 
     Returns:
         Atoms: The expanded supercell.
@@ -112,12 +91,18 @@ def ensure_supercell_size(atoms: Atoms, r_cut: float, factor: float = 1.0) -> At
     for i in range(3):
         if atoms.pbc[i]:
             if cell_lengths[i] < 1e-6:
+                # Avoid division by zero, though unlikely for valid crystal
                 repeat[i] = 1
             else:
                 repeat[i] = max(1, int(ceil(l_min / cell_lengths[i])))
 
+    # If repeat is [1,1,1], make_supercell returns a copy usually.
+    # We want to return a new object to be safe.
     if repeat == [1, 1, 1]:
         return atoms.copy()
 
+    # make_supercell returns a new Atoms object
+    # Note: ase.build.make_supercell or atoms * repeat
+    # atoms * repeat works
     supercell = atoms * repeat
     return supercell
