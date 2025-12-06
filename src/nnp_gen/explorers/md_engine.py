@@ -6,6 +6,7 @@ from ase import Atoms
 from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase import units
+from ase.data import covalent_radii
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -21,28 +22,22 @@ def _get_calculator(model_name: str, device: str):
         torch.set_num_threads(1)
         torch.set_num_interop_threads(1)
     except ImportError:
-        # If torch is missing, we can't really use MACE/SevenNet usually.
-        # But maybe we want to mock this function in tests without torch.
-        # If real run, this raises ImportError later when importing mace.
         pass
 
     if model_name == "mace":
         try:
             from mace.calculators import MACECalculator
-            # mace-mp-0-small recommended
-            # Note: arguments might vary by version, assuming standard kwargs
             return MACECalculator(model_paths=None, model_type="mace_mp_0_small", device=device, default_dtype="float32")
         except ImportError:
              raise ImportError("mace not found")
         except Exception as e:
-             # Fallback for different signature?
+             # Fallback for different signature
              from mace.calculators import MACECalculator
              return MACECalculator(model_paths=None, device=device)
 
     elif model_name == "sevenn":
         try:
             from sevenn.calculators import SevenNetCalculator
-            # Assuming default model 7net-0 available or checking args
             return SevenNetCalculator(model="7net-0", device=device)
         except ImportError:
              raise ImportError("sevenn not found")
@@ -69,28 +64,42 @@ def run_single_md(
         atoms.calc = calc
 
         # Initialize velocities
-        # temperature_K requires ase.units? No, it's just float in ASE methods usually
         MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
         Stationary(atoms)
 
         # Setup Dynamics
-        # friction 0.02 atomic units? usually 0.002-0.02.
-        dyn = Langevin(atoms, 1.0 * units.fs, temperature_K=temp, friction=0.02)
+        # Friction 0.002 (approx 500fs decay time if units are fs)
+        dyn = Langevin(atoms, 1.0 * units.fs, temperature_K=temp, friction=0.002)
 
         trajectory = []
 
+        # Precompute thresholds for overlap check
+        radii = covalent_radii[atoms.numbers]
+        sum_radii = radii[:, None] + radii[None, :]
+        # Allow some overlap (e.g. 50% of sum of radii) before calling it an explosion
+        overlap_threshold_ratio = 0.5
+        thresholds = sum_radii * overlap_threshold_ratio
+
+        # Set diagonal to zero for threshold or handle dists diagonal
+        np.fill_diagonal(thresholds, 0.0)
+
         def step_check():
             # Guardrail
-            # Check min distance
-            # mic=True is important for periodic systems
             try:
+                # mic=True is important for periodic systems
                 dists = atoms.get_all_distances(mic=True)
                 np.fill_diagonal(dists, np.inf)
+
+                # Check absolute minimum (nuclear fusion prevention)
                 min_d = np.min(dists)
-                if min_d < 0.6:
-                    raise RuntimeError(f"Structure Exploded: min_dist {min_d} < 0.6")
+                if min_d < 0.5:
+                    raise RuntimeError(f"Structure Exploded: min_dist {min_d:.2f} < 0.5")
+
+                # Check element-specific overlap
+                if np.any(dists < thresholds):
+                     raise RuntimeError("Structure Exploded: Atomic overlap detected")
+
             except ValueError:
-                # Can happen if structure is empty or weird
                 pass
 
         # Initial check
@@ -101,22 +110,19 @@ def run_single_md(
             step_check()
 
             if (i + 1) % interval == 0:
-                # Save copy
-                # Ensure we strip calculator to save memory/pickling issues?
-                # Atoms copy usually copies calc?
-                # Better to save atoms with minimal info
                 snap = atoms.copy()
-                snap.calc = None
+                snap.calc = None # Fix memory leak
                 trajectory.append(snap)
 
         return trajectory
 
     except RuntimeError as e:
         # Expected explosion
+        logger.warning(f"MD Exploration Failed (RuntimeError): {e}")
         return None
     except Exception as e:
         # Unexpected error
-        # In production, might log to file
+        logger.error(f"MD Exploration Error: {e}")
         return None
 
 class MDExplorer:
@@ -132,15 +138,10 @@ class MDExplorer:
         # Prepare params
         temp = self.config.exploration.temperature
         steps = self.config.exploration.steps
-        # Save every 50 steps or so
         interval = max(1, steps // 50)
 
-        # Default params
+        # Default params (should be configurable, but keeping simple as per current code)
         calc_params = {"model_name": "mace", "device": "cpu"}
-
-        # Use ProcessPoolExecutor
-        # If n_workers is 1, maybe run serial for easier debugging?
-        # But requirement says "use concurrent.futures...".
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = []
@@ -149,7 +150,6 @@ class MDExplorer:
                     executor.submit(run_single_md, seed, temp, steps, interval, calc_params)
                 )
 
-            # Use tqdm for progress
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(seeds), desc="MD Exploration"):
                 try:
                     traj = future.result()
