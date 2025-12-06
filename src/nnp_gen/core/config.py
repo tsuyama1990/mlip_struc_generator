@@ -155,6 +155,19 @@ class SolventAdsorbateSystemConfig(VacuumAdsorbateSystemConfig):
     solvent_density: float = Field(1.0, description="Target solvent density in g/cm^3")
     solvent_smiles: str = Field("O", description="SMILES string for the solvent (default Water)")
 
+class UserFileSystemConfig(BaseSystemConfig):
+    type: Literal["user_file"] = "user_file"
+    path: str = Field(..., description="Path to the structure file")
+    format: Optional[str] = Field(None, description="File format (e.g., 'cif', 'xyz'). If None, inferred from extension.")
+    repeat: int = Field(1, description="Number of times to duplicate the structures")
+
+    @field_validator('repeat')
+    @classmethod
+    def validate_repeat(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("repeat must be at least 1")
+        return v
+
 # Discriminated Union for System Config
 SystemConfig = Union[
     IonicSystemConfig,
@@ -163,7 +176,8 @@ SystemConfig = Union[
     MoleculeSystemConfig,
     InterfaceSystemConfig,
     VacuumAdsorbateSystemConfig,
-    SolventAdsorbateSystemConfig
+    SolventAdsorbateSystemConfig,
+    UserFileSystemConfig
 ]
 
 # --- Exploration Configuration ---

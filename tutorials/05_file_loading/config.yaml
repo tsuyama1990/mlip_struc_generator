@@ -1,0 +1,36 @@
+defaults:
+  - _self_
+
+system:
+  type: user_file
+  # Path can be absolute or relative.
+  # If using relative path, it is relative to where you run main.py from,
+  # or requires correct hydra configuration for CWD.
+  # For this tutorial, we assume running from repo root or tutorial dir.
+  path: ${hydra:runtime.cwd}/tutorials/05_file_loading/start.xyz
+  format: xyz
+  repeat: 50
+  elements: [Au]
+  rattle_std: 0.05
+  constraints:
+    max_atoms: 1000
+    min_density: 0.0
+    min_distance: 0.5
+    min_cell_length_factor: 1.0
+    r_cut: 5.0
+
+exploration:
+  method: md
+  model_name: emt
+  temperature: 300
+  steps: 100
+  timestep: 1.0
+
+sampling:
+  strategy: fps
+  n_samples: 10
+  descriptor_type: soap
+  min_distance: 1.5
+
+output_dir: output_file_loading
+seed: 42
