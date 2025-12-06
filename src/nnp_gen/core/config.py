@@ -1,5 +1,6 @@
-from typing import Literal, Union, List, Dict, Optional, Tuple
+from typing import Literal, Union, List, Dict, Optional, Tuple, Any
 import numpy as np
+from enum import Enum
 from pydantic import BaseModel, Field, model_validator, field_validator
 
 # --- System Configuration ---
@@ -60,12 +61,54 @@ class MoleculeSystemConfig(BaseSystemConfig):
     # Molecules usually don't have supercell expansion in the same way, or pbc is False
     pbc: List[bool] = Field([False, False, False], description="Periodic Boundary Conditions for Molecules")
 
+class InterfaceMode(str, Enum):
+    HETERO_CRYSTAL = "hetero_crystal"  # Solid on Solid (e.g., Cu on Au)
+    SOLID_LIQUID = "solid_liquid"      # Liquid on Solid (e.g., Water on TiO2)
+
+class InterfaceSystemConfig(BaseSystemConfig):
+    type: Literal["interface"] = "interface"
+    mode: InterfaceMode
+
+    # RECURSIVE CONFIGURATION:
+    # We re-use the specific configs for the two phases.
+    phase_a: Dict[str, Any] = Field(..., description="Config dict for the substrate (e.g. Alloy)")
+    phase_b: Dict[str, Any] = Field(..., description="Config dict for the film/liquid")
+
+    # Interface Physics
+    vacuum: float = Field(15.0, description="Vacuum padding in Angstrom")
+    interface_distance: float = Field(2.5, description="Initial distance between phases")
+    max_mismatch: float = Field(0.05, description="Max allowed lattice mismatch (5%)")
+
+    # For Solid-Liquid
+    solvent_density: float = Field(1.0, description="Target liquid density in g/cm^3")
+
+    elements: List[str] = Field(default=[], description="List of elements in the system")
+
+    @model_validator(mode='before')
+    @classmethod
+    def extract_elements(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # If elements are not explicitly provided, try to extract from phases
+            if 'elements' not in data or not data['elements']:
+                elems = set()
+                for phase_key in ['phase_a', 'phase_b']:
+                    if phase_key in data and isinstance(data[phase_key], dict):
+                        phase_elements = data[phase_key].get('elements', [])
+                        if phase_elements:
+                            elems.update(phase_elements)
+
+                # If we found elements, set them
+                if elems:
+                    data['elements'] = list(elems)
+        return data
+
 # Discriminated Union for System Config
 SystemConfig = Union[
     IonicSystemConfig,
     AlloySystemConfig,
     CovalentSystemConfig,
-    MoleculeSystemConfig
+    MoleculeSystemConfig,
+    InterfaceSystemConfig
 ]
 
 # --- Exploration Configuration ---
