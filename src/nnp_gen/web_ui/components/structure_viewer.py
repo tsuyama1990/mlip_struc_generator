@@ -1,10 +1,12 @@
+import json
+
 def generate_3dmol_html(xyz_data: str, width="100%", height="400px") -> str:
     """
     Generate HTML for embedding 3Dmol.js viewer.
     """
-    # Escaping backticks or other special chars in xyz_data if necessary
-    # Usually XYZ data is safe lines of text.
-    xyz_safe = xyz_data.replace("`", "\`")
+    # Use json.dumps to safely serialize the string for JavaScript injection.
+    # This handles escaping of quotes, backslashes, and newlines correctly, prevents XSS.
+    xyz_json = json.dumps(xyz_data)
 
     html = f"""
     <div style="height: {height}; width: {width}; position: relative;" class="viewer_container">
@@ -13,7 +15,7 @@ def generate_3dmol_html(xyz_data: str, width="100%", height="400px") -> str:
     <script>
         (function() {{
             let viewer = $3Dmol.createViewer("3dmol-viewer", {{backgroundColor: "white"}});
-            let xyz = `{xyz_safe}`;
+            let xyz = {xyz_json};
             viewer.addModel(xyz, "xyz");
             viewer.setStyle({{stick: {{}}, sphere: {{scale: 0.3}}}});
             viewer.zoomTo();

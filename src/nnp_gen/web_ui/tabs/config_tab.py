@@ -1,7 +1,7 @@
 import panel as pn
 import param
 import yaml
-from typing import List, Dict, Type
+from typing import List, Dict, Type, Any
 from pydantic import ValidationError
 
 from nnp_gen.core.config import (
@@ -44,6 +44,7 @@ class ConfigViewModel(param.Parameterized):
         super().__init__(**params)
         self.job_manager = JobManager()
         self._last_job_id = None
+        self._raw_config_data = {} # Preserves loaded config to avoid data loss
 
     @param.depends("system_type")
     def system_settings_panel(self):
@@ -60,69 +61,84 @@ class ConfigViewModel(param.Parameterized):
             return pn.pane.Markdown(f"**{self.system_type} configuration not fully implemented in UI demo.**")
 
     def get_pydantic_config(self) -> AppConfig:
-        """Convert current UI state to AppConfig."""
+        """
+        Convert current UI state to AppConfig.
+        If a config was loaded, merge UI changes into it to preserve unmapped fields.
+        """
+        # Start with raw data or empty dict
+        config_data = self._raw_config_data.copy() if self._raw_config_data else {}
+
+        # Helper to ensure dict structure exists
+        def ensure_dict(d, key):
+            if key not in d or not isinstance(d[key], dict):
+                d[key] = {}
+            return d[key]
+
+        # 1. Update System Config
+        sys_data = ensure_dict(config_data, "system")
+        sys_data["type"] = self.system_type
+
         elements = [e.strip() for e in self.elements_input.split(",") if e.strip()]
+        sys_data["elements"] = elements
 
-        constraints = PhysicsConstraints(
-            max_atoms=self.max_atoms,
-            min_distance=self.min_distance
-        )
+        constraints = ensure_dict(sys_data, "constraints")
+        constraints["max_atoms"] = self.max_atoms
+        constraints["min_distance"] = self.min_distance
 
+        # Type specific updates
         if self.system_type == "alloy":
-            system_config = AlloySystemConfig(
-                elements=elements,
-                constraints=constraints,
-                lattice_constant=self.alloy_lattice_constant
-            )
+            sys_data["lattice_constant"] = self.alloy_lattice_constant
         elif self.system_type == "molecule":
-            system_config = MoleculeSystemConfig(
-                elements=elements, # Molecules might ignore this or verify against smiles
-                constraints=constraints,
-                smiles=self.molecule_smiles
-            )
-        elif self.system_type == "ionic":
-             # Demo placeholder
-             system_config = IonicSystemConfig(
-                 elements=elements,
-                 constraints=constraints,
-                 oxidation_states={"O": -2} # dummy
-             )
-        else:
-             # Covalent placeholder
-             system_config = CovalentSystemConfig(
-                 elements=elements,
-                 constraints=constraints
-             )
+            sys_data["smiles"] = self.molecule_smiles
+            # Ensure elements is optional or inferred for molecule if not provided?
+            # Pydantic model will handle validation.
 
-        expl_config = ExplorationConfig(
-            temperature=self.temperature,
-            steps=self.steps
-        )
+        # 2. Update Exploration Config
+        expl_data = ensure_dict(config_data, "exploration")
+        expl_data["temperature"] = self.temperature
+        expl_data["steps"] = self.steps
 
-        samp_config = SamplingConfig()
+        # 3. Ensure other required sections exist if creating from scratch
+        if "sampling" not in config_data:
+            config_data["sampling"] = {}
+        if "output_dir" not in config_data:
+            config_data["output_dir"] = "output"
 
-        return AppConfig(
-            system=system_config,
-            exploration=expl_config,
-            sampling=samp_config,
-            output_dir="output"
-        )
+        # 4. Construct AppConfig
+        # This validates everything, including the merged data
+        return AppConfig(**config_data)
 
     def load_config_from_yaml(self, content: str):
         try:
             data = yaml.safe_load(content)
-            # Validation via Pydantic
-            # Note: A robust implementation would map every field back.
-            # Here we do a partial mapping for demonstration.
+            self._raw_config_data = data # Store raw data
+
+            # Map known fields to UI
             if "system" in data:
                 sys = data["system"]
                 self.system_type = sys.get("type", "alloy")
                 if "elements" in sys:
                     self.elements_input = ",".join(sys["elements"])
+
+                # Update param values based on loaded data
                 if "lattice_constant" in sys:
                     self.alloy_lattice_constant = sys["lattice_constant"]
                 if "smiles" in sys:
                     self.molecule_smiles = sys["smiles"]
+
+                if "constraints" in sys:
+                    cons = sys["constraints"]
+                    if "max_atoms" in cons:
+                        self.max_atoms = cons["max_atoms"]
+                    if "min_distance" in cons:
+                        self.min_distance = cons["min_distance"]
+
+            if "exploration" in data:
+                expl = data["exploration"]
+                if "temperature" in expl:
+                    self.temperature = expl["temperature"]
+                if "steps" in expl:
+                    self.steps = expl["steps"]
 
             self.status_message = "Config loaded successfully."
         except Exception as e:
@@ -165,11 +181,8 @@ class ConfigTab:
         run_btn.on_click(self.vm.run_pipeline)
 
         # Periodic Callback for logs
-        # Note: In a real app, this should be added to the document or main loop.
-        # Here we just define the UI.
         log_area = pn.widgets.TextAreaInput.from_param(self.vm.param.logs, height=300, disabled=True)
 
-        # We need to register the callback when served
         try:
             pn.state.add_periodic_callback(self.vm.update_logs, period=1000)
         except RuntimeError:

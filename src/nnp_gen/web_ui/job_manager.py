@@ -50,6 +50,7 @@ class JobManager:
         # Daemon processes cannot spawn children, so we must use threads here.
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.jobs: Dict[str, JobInfo] = {}
+        self._jobs_lock = threading.RLock() # Use RLock for internal safety
         self._initialized = True
 
         # Determine logs directory relative to where running
@@ -81,7 +82,9 @@ class JobManager:
             log_file_path=str(log_file),
             output_dir=str(effective_output_dir)
         )
-        self.jobs[job_id] = job_info
+
+        with self._jobs_lock:
+            self.jobs[job_id] = job_info
 
         # Submit to executor
         self.executor.submit(self._run_job_wrapper, job_id, job_config)
@@ -92,7 +95,14 @@ class JobManager:
         """
         Wrapper to run the pipeline, capturing logs and handling status.
         """
-        job = self.jobs[job_id]
+        # Acquire job info safely
+        with self._jobs_lock:
+            job = self.jobs.get(job_id)
+
+        if not job:
+            logger.error(f"Job {job_id} not found in wrapper")
+            return
+
         job.status = JobStatus.RUNNING
 
         log_path = job.log_file_path
@@ -100,6 +110,7 @@ class JobManager:
         # Capture logs from 'nnp_gen' logger to the file
         # We assume nnp_gen is the parent logger for all core modules
         try:
+            # Note: log_capture_to_file uses ThreadLogFilter to isolate logs
             with log_capture_to_file("nnp_gen", log_path):
                 try:
                     # We also need to log the start here so it appears in the file
@@ -128,14 +139,19 @@ class JobManager:
             logger.error(f"Job {job_id} failed (caught in wrapper): {e}")
 
     def get_job(self, job_id: str) -> Optional[JobInfo]:
-        return self.jobs.get(job_id)
+        with self._jobs_lock:
+            return self.jobs.get(job_id)
 
     def get_all_jobs(self) -> List[JobInfo]:
         # Return sorted by start time desc
-        return sorted(self.jobs.values(), key=lambda x: x.start_time, reverse=True)
+        with self._jobs_lock:
+            return sorted(list(self.jobs.values()), key=lambda x: x.start_time, reverse=True)
 
     def get_log_content(self, job_id: str) -> str:
-        job = self.jobs.get(job_id)
+        # We don't need to lock to read the file, but let's check job existence safely
+        with self._jobs_lock:
+            job = self.jobs.get(job_id)
+
         if not job or not os.path.exists(job.log_file_path):
             return ""
 
