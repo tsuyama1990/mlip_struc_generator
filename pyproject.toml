@@ -33,3 +33,9 @@ molecule = ["rdkit"]
 ml-calculators = ["mace-torch", "sevenn", "matgl", "chgnet"]
 descriptors = ["dscribe"]
 all = ["pymatgen", "icet", "pyxtal", "rdkit", "mace-torch", "sevenn", "matgl", "chgnet", "dscribe"]
+gui = [
+    "panel",
+    "plotly",
+    "pyyaml",
+    "pydantic"
+]
