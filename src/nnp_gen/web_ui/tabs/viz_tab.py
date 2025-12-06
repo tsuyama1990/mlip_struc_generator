@@ -163,19 +163,25 @@ class VizViewModel(param.Parameterized):
         X = np.nan_to_num(X)
 
         # Submit to executor
-        future = self.ui_executor.submit(self._run_pca, X, valid_indices)
+        # Pass current_db_path to validate in callback
+        db_path_at_submission = self.current_db_path
+        future = self.ui_executor.submit(self._run_pca, X, valid_indices, db_path_at_submission)
         future.add_done_callback(self._on_pca_complete)
 
-    def _run_pca(self, X, valid_indices):
+    def _run_pca(self, X, valid_indices, db_path):
         """Runs in worker thread."""
         pca = PCA(n_components=2)
         coords = pca.fit_transform(X)
-        return coords, valid_indices
+        return coords, valid_indices, db_path
 
     def _on_pca_complete(self, future):
         """Callback when PCA is done."""
         try:
-            coords, valid_indices = future.result()
+            coords, valid_indices, db_path = future.result()
+
+            # Validate that the result belongs to the current DB
+            if db_path != self.current_db_path:
+                return
 
             # Schedule UI update on main thread/loop
             if pn.state.curdoc:
