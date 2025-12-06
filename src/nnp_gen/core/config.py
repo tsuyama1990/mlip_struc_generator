@@ -1,6 +1,6 @@
 from typing import Literal, Union, List, Dict, Optional, Tuple
 import numpy as np
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 # --- System Configuration ---
 
@@ -17,6 +17,12 @@ class BaseSystemConfig(BaseModel):
     pbc: List[bool] = Field([True, True, True], description="Periodic Boundary Conditions")
     rattle_std: float = Field(0.01, description="Standard deviation for Gaussian rattle in Angstrom")
     vol_scale_range: List[float] = Field([0.95, 1.05], min_length=2, max_length=2, description="Min/Max scaling factors for volume augmentation")
+
+    @field_validator('rattle_std')
+    def validate_rattle_std(cls, v):
+        if v < 0 or v > 0.5:
+            raise ValueError("rattle_std should be between 0.0 and 0.5 Angstrom")
+        return v
 
 class IonicSystemConfig(BaseSystemConfig):
     type: Literal["ionic"] = "ionic"
@@ -60,6 +66,18 @@ class ExplorationConfig(BaseModel):
     pressure: Optional[float] = Field(None, description="Pressure in GPa (None for NVT)")
     steps: int = Field(1000, description="Number of steps per exploration run")
     timestep: float = Field(1.0, description="Timestep in fs")
+
+    @field_validator('temperature')
+    def validate_temperature(cls, v):
+        if v < 0:
+            raise ValueError("Temperature must be positive")
+        return v
+
+    @field_validator('steps')
+    def validate_steps(cls, v):
+        if v <= 0:
+            raise ValueError("Steps must be positive")
+        return v
 
 # --- Sampling Configuration ---
 

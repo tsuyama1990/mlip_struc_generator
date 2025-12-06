@@ -80,7 +80,8 @@ class PipelineRunner:
         # 4. Storage
         logger.info("Step 4: Saving to Database")
         metadata_list = []
-        config_hash_val = str(hash(str(self.config))) # Simple hash
+        # Prefix with 'hash_' to avoid ASE DB ambiguity (string vs int)
+        config_hash_val = f"hash_{hash(str(self.config))}"
 
         for i, atoms in enumerate(sampled_structures):
             meta = StructureMetadata(
@@ -97,4 +98,26 @@ class PipelineRunner:
         except Exception as e:
             logger.error(f"Database save failed: {e}")
 
+        # 5. Export
+        logger.info("Step 5: Exporting Data")
+        try:
+            xyz_path = os.path.join(self.config.output_dir, "dataset.xyz")
+            self.export_xyz(xyz_path)
+        except Exception as e:
+            logger.error(f"Export failed: {e}")
+
         logger.info("Pipeline Complete.")
+
+    def export_xyz(self, output_path: str):
+        """Export sampled structures to XYZ format."""
+        from ase.io import write
+
+        # Query db to ensure consistency or use sampled_structures
+        # Using db ensures we get what was saved (including restored descriptors if any logic there)
+
+        atoms_list = list(self.db_manager.get_sampled_structures())
+        if atoms_list:
+            write(output_path, atoms_list)
+            logger.info(f"Exported {len(atoms_list)} structures to {output_path}")
+        else:
+            logger.warning("No sampled structures to export.")

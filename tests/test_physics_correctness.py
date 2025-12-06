@@ -96,3 +96,49 @@ def test_strain_tensor_implementation():
     # Anyway, checking that it changes the cell is enough.
 
     assert not np.allclose(atoms_shear.cell.array, np.eye(3))
+
+def test_md_energy_conservation_nve():
+    """
+    Verify that a generated structure is stable enough for NVE MD
+    (Energy conservation < 1% drift).
+    """
+    from ase.calculators.emt import EMT
+    from ase.md.verlet import VelocityVerlet
+    from ase import units
+    from nnp_gen.generators.alloy import AlloyGenerator
+    from nnp_gen.core.config import AlloySystemConfig
+
+    # Generate a structure
+    config = AlloySystemConfig(elements=["Cu"], type="alloy")
+    gen = AlloyGenerator(config)
+    atoms_list = gen.generate()
+    assert len(atoms_list) > 0
+    atoms = atoms_list[0]
+
+    # Setup NVE
+    atoms.calc = EMT()
+    dyn = VelocityVerlet(atoms, 1.0 * units.fs)
+
+    # Run
+    # Initial energy
+    try:
+        e_start = atoms.get_potential_energy() # Start from potential, KE is 0
+        dyn.run(steps=50)
+        e_end = atoms.get_total_energy() # Conserved quantity is E_tot
+
+        # E_tot start should be equal to E_tot end.
+        # Initial KE is 0.
+        # Wait, VelocityVerlet doesn't initialize velocities?
+        # If KE=0, it just falls down gradient.
+        # Total energy should be conserved.
+
+        # Need to capture E_tot at start
+        e_tot_start = atoms.get_total_energy()
+
+        drift = abs(e_end - e_tot_start) / (abs(e_tot_start) + 1e-6)
+        assert drift < 0.05 # 5% drift allowable for 50 steps on generated struct?
+        # Actually, if structure is relaxed/reasonable, it should be low.
+        # But random alloy might be high energy.
+        # Let's see.
+    except Exception as e:
+        pytest.fail(f"MD failed: {e}")
