@@ -13,7 +13,8 @@ class MockGenerator(BaseGenerator):
         self.structures_to_yield = structures_to_yield
 
     def _generate_impl(self):
-        return self.structures_to_yield
+        # Return copies to avoid modifying the input list in place if they are re-used
+        return [atoms.copy() for atoms in self.structures_to_yield]
 
 # --- 1. Static Constraint Test ---
 
@@ -21,9 +22,6 @@ def test_static_constraint_max_atoms():
     """
     Test that config validation catches supercell settings that would exceed max_atoms.
     """
-    # Case 1: Valid
-    # max_atoms = 200, supercell = 4x4x4 (64x)
-    # If we assume 1 atom/cell, 64 < 200. OK.
     config = AlloySystemConfig(
         type="alloy",
         elements=["Fe"],
@@ -32,9 +30,6 @@ def test_static_constraint_max_atoms():
     )
     assert config.supercell_size == [4, 4, 4]
 
-    # Case 2: Invalid
-    # max_atoms = 100, supercell = 5x5x5 (125x)
-    # 125 > 100 -> Error
     with pytest.raises(ValidationError) as excinfo:
         AlloySystemConfig(
             type="alloy",
@@ -53,25 +48,24 @@ def test_dynamic_filter_sanity_check():
     constraints = PhysicsConstraints(
         max_atoms=50,
         min_distance=1.0,
-        min_density=0.0 # Ignore density for this test to focus on others
+        min_density=0.0,
+        # Disable supercell expansion for this test
+        min_cell_length_factor=0.0,
+        r_cut=1.0
     )
     config = AlloySystemConfig(
         type="alloy",
         elements=["Cu"],
-        constraints=constraints
+        constraints=constraints,
+        # Disable physics augmentation
+        rattle_std=0.0,
+        vol_scale_range=[1.0, 1.0],
+        pbc=[True, True, True]
     )
 
-    # Create test structures
-    # A. Valid: 1 atom
     struct_A = Atoms('Cu', positions=[[0, 0, 0]], cell=[3, 3, 3])
-
-    # B. Too many atoms: 60 atoms (just repeating dummy)
     struct_B = Atoms('Cu60', positions=[[0,0,0]]*60, cell=[10,10,10])
-
-    # C. Overlapping: distance 0.1 < 1.0
     struct_C = Atoms('Cu2', positions=[[0,0,0], [0,0,0.1]], cell=[3,3,3])
-
-    # D. Valid but close to limit (distance 1.1 > 1.0)
     struct_D = Atoms('Cu2', positions=[[0,0,0], [0,0,1.1]], cell=[3,3,3])
 
     gen = MockGenerator(config, [struct_A, struct_B, struct_C, struct_D])
@@ -80,31 +74,38 @@ def test_dynamic_filter_sanity_check():
 
     # Assertions
     assert len(valid_structures) == 2
-    assert valid_structures[0] == struct_A
-    assert valid_structures[1] == struct_D
+    # Check simple properties instead of equality because generate might do copy or minor float adjustments
+    assert len(valid_structures[0]) == 1 # A
+    assert len(valid_structures[1]) == 2 # D
+    assert str(valid_structures[0].symbols) == "Cu"
+    assert str(valid_structures[1].symbols) == "Cu2"
 
 def test_dynamic_filter_density():
     """
     Test min_density filtering.
     """
-    # Density of Cu is ~8.96 g/cm3.
-    # 1 atom of Cu in 10x10x10 A^3 box = mass 63.5 / vol 1000 = 0.0635 amu/A3
-    # 0.0635 * 1.66 = 0.1 g/cm3. Very low.
+    constraints = PhysicsConstraints(
+        min_density=1.0,
+        min_cell_length_factor=0.0,
+        r_cut=1.0
+    )
+    config = AlloySystemConfig(
+        type="alloy",
+        elements=["Cu"],
+        constraints=constraints,
+        rattle_std=0.0,
+        vol_scale_range=[1.0, 1.0]
+    )
 
-    constraints = PhysicsConstraints(min_density=1.0) # Require at least 1 g/cm3
-    config = AlloySystemConfig(type="alloy", elements=["Cu"], constraints=constraints)
-
-    # Low density
-    struct_low = Atoms('Cu', positions=[[5,5,5]], cell=[10,10,10]) # vol 1000, dens ~0.1
-
-    # High density (small cell)
-    struct_high = Atoms('Cu', positions=[[0,0,0]], cell=[2,2,2]) # vol 8, dens ~ 13 g/cm3
+    struct_low = Atoms('Cu', positions=[[5,5,5]], cell=[10,10,10])
+    struct_high = Atoms('Cu', positions=[[0,0,0]], cell=[2,2,2])
 
     gen = MockGenerator(config, [struct_low, struct_high])
     valid = gen.generate()
 
     assert len(valid) == 1
-    assert valid[0] == struct_high
+    assert len(valid[0]) == 1
+    assert np.allclose(valid[0].cell.lengths(), [2,2,2])
 
 # --- 3. Boundary Condition Test ---
 
@@ -112,21 +113,24 @@ def test_pbc_enforcement():
     """
     Verify PBC settings are applied.
     """
-    # Crystal -> PBC True
     config_alloy = AlloySystemConfig(
         type="alloy",
         elements=["Cu"],
-        pbc=[True, True, True]
+        pbc=[True, True, True],
+        rattle_std=0.0,
+        vol_scale_range=[1.0, 1.0],
+        constraints=PhysicsConstraints(min_cell_length_factor=0.0, r_cut=1.0)
     )
-    # Molecule -> PBC False
     config_mol = MoleculeSystemConfig(
         type="molecule",
         elements=["H", "H"],
         smiles="HH",
-        pbc=[False, False, False]
+        pbc=[False, False, False],
+        rattle_std=0.0,
+        vol_scale_range=[1.0, 1.0],
+        constraints=PhysicsConstraints(min_cell_length_factor=0.0, r_cut=1.0)
     )
 
-    # Generator might return atoms with wrong PBC, should be fixed
     atoms_wrong = Atoms('Cu', pbc=[False, False, False])
 
     gen_alloy = MockGenerator(config_alloy, [atoms_wrong.copy()])

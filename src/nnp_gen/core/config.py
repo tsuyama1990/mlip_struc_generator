@@ -1,4 +1,4 @@
-from typing import Literal, Union, List, Dict, Optional
+from typing import Literal, Union, List, Dict, Optional, Tuple
 import numpy as np
 from pydantic import BaseModel, Field, model_validator
 
@@ -8,33 +8,27 @@ class PhysicsConstraints(BaseModel):
     max_atoms: int = Field(200, description="Hard limit for total number of atoms")
     min_density: float = Field(0.0, description="Minimum density (g/cm^3)")
     min_distance: float = Field(0.5, description="Minimum distance between atoms (Angstrom)")
+    min_cell_length_factor: float = Field(2.0, description="Minimum cell length relative to r_cut")
+    r_cut: float = Field(5.0, description="Cutoff radius of the potential model")
 
 class BaseSystemConfig(BaseModel):
     elements: List[str] = Field(..., min_length=1, description="List of elements in the system")
     constraints: PhysicsConstraints = Field(default_factory=PhysicsConstraints)
     pbc: List[bool] = Field([True, True, True], description="Periodic Boundary Conditions")
+    rattle_std: float = Field(0.01, description="Standard deviation for Gaussian rattle in Angstrom")
+    vol_scale_range: List[float] = Field([0.95, 1.05], min_length=2, max_length=2, description="Min/Max scaling factors for volume augmentation")
 
 class IonicSystemConfig(BaseSystemConfig):
     type: Literal["ionic"] = "ionic"
     oxidation_states: Dict[str, int] = Field(..., description="Oxidation states for each element")
     charge_balance_tolerance: float = Field(0.0, description="Tolerance for charge balance")
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
+    default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")
 
     @model_validator(mode='after')
     def check_max_atoms(self):
-        # Rough estimate: assumption of at least 1 atom per unit cell per element?
-        # Or just checking expansion factor scaling?
-        # The prompt says: "If unit_atoms * 5*5*5 > max_atoms".
-        # We don't know unit_atoms exactly without structure.
-        # But we can assume minimal valid cell has sum(stoichiometry) atoms.
-        # If we don't know stoichiometry, assume 1 atom.
-        # Let's assume minimum 1 atom per unit cell for safety if just checking supercell scaling vs max isn't enough.
-        # However, 5*5*5 = 125. If max_atoms=200, it fits (125 < 200).
-        # If user gives 10*10*10 = 1000, it fails.
-
         vol_factor = self.supercell_size[0] * self.supercell_size[1] * self.supercell_size[2]
         if vol_factor > self.constraints.max_atoms:
-            # Even with 1 atom/cell, this exceeds max_atoms
             raise ValueError(f"Supercell expansion {self.supercell_size} results in at least {vol_factor} atoms, exceeding max_atoms={self.constraints.max_atoms}")
         return self
 
@@ -43,6 +37,7 @@ class AlloySystemConfig(BaseSystemConfig):
     lattice_constant: Optional[float] = Field(None, description="Approximate lattice constant")
     spacegroup: Optional[int] = Field(None, description="Target spacegroup number (1-230)")
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
+    default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")
 
     @model_validator(mode='after')
     def check_max_atoms(self):

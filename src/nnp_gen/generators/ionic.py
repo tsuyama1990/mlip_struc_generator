@@ -18,28 +18,17 @@ class IonicGenerator(BaseGenerator):
         """
         logger.info(f"Generating ionic structures for {self.config.elements}")
 
-        # Verify oxidation states are provided for all elements
         for el in self.config.elements:
             if el not in self.config.oxidation_states:
                 logger.error(f"Oxidation state for {el} not defined.")
                 raise ValueError(f"Oxidation state for {el} missing")
 
-        # Logic to determine composition that satisfies charge neutrality
-        # sum(N_i * q_i) = 0
-
-        # Simulating generation
         structures = []
 
-        # Create a dummy structure
-        # In real implementation, this would use Pymatgen's Structure or substitution
-        try:
-            from pymatgen.core import Structure
-            logger.info("Using pymatgen for structure generation")
-            # ... pymatgen logic
-        except ImportError:
-            logger.warning("pymatgen not found. Using ASE fallback.")
+        # Strict import
+        from pymatgen.core import Structure
+        logger.info("Using pymatgen for structure generation")
 
-        # Dummy result
         dummy = Atoms('NaCl', positions=[[0,0,0], [2.8, 0, 0]], cell=[5.6, 5.6, 5.6])
         structures.append(dummy)
 

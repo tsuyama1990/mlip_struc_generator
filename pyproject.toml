@@ -16,6 +16,8 @@ dependencies = [
     "hydra-core",
     "ase",
     "numpy",
+    "tqdm",
+    "scipy",
     # Heavy scientific libraries (listed but strictly treated as optional/mocked for now)
     "pymatgen",
     "pyxtal",

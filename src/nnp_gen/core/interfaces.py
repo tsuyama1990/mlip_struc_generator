@@ -4,6 +4,12 @@ import logging
 import numpy as np
 from ase import Atoms
 from nnp_gen.core.config import SystemConfig
+from nnp_gen.core.physics import (
+    apply_rattle,
+    apply_volumetric_strain,
+    set_initial_magmoms,
+    ensure_supercell_size
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +32,31 @@ class BaseGenerator(ABC):
         valid_structures = []
 
         for i, atoms in enumerate(raw_structures):
-            # Enforce PBC from config before validation to ensure distance checks use correct MIC
+            # Pipeline Logic
+
+            # 0. Enforce PBC from config (Crucial for ensure_supercell checks)
             atoms.set_pbc(self.config.pbc)
 
+            # 1. ensure_supercell_size
+            atoms = ensure_supercell_size(
+                atoms,
+                r_cut=self.config.constraints.r_cut,
+                factor=self.config.constraints.min_cell_length_factor
+            )
+
+            # 2. set_initial_magmoms (if applicable)
+            if hasattr(self.config, 'default_magmoms') and self.config.default_magmoms:
+                atoms = set_initial_magmoms(atoms, self.config.default_magmoms)
+
+            # 3. apply_volumetric_strain
+            if self.config.vol_scale_range:
+                atoms = apply_volumetric_strain(atoms, self.config.vol_scale_range)
+
+            # 4. apply_rattle
+            if self.config.rattle_std > 0:
+                atoms = apply_rattle(atoms, self.config.rattle_std)
+
+            # 5. validate_structure
             if self.validate_structure(atoms):
                 valid_structures.append(atoms)
             else:
@@ -40,6 +68,7 @@ class BaseGenerator(ABC):
     def _generate_impl(self) -> List[Atoms]:
         """
         Implementation of the specific generation logic.
+        Must return ase.Atoms objects.
         """
         pass
 
@@ -59,9 +88,7 @@ class BaseGenerator(ABC):
         # mic=True (minimum image convention) if pbc is True
         # Note: get_all_distances with mic=True can be slow for large systems but for <200 atoms it's fast.
         if len(atoms) > 1:
-            # We use mic=True if any PBC is set, but let's just assume we check real distances
-            # If atoms are overlapping, it's bad.
-            # get_all_distances returns N x N matrix
+            # We use mic=True if any PBC is set
             dists = atoms.get_all_distances(mic=any(atoms.pbc))
             # Set diagonal to infinity to ignore self-distance
             np.fill_diagonal(dists, np.inf)
@@ -72,8 +99,6 @@ class BaseGenerator(ABC):
                 return False
 
         # 3. Min Density
-        # density = mass / volume. (g/cm^3)
-        # ASE has no direct get_density() but likely we can compute if volume is defined
         try:
             vol = atoms.get_volume()
             if vol > 1e-6: # Avoid div by zero
