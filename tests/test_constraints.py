@@ -18,19 +18,26 @@ class MockGenerator(BaseGenerator):
 
 # --- 1. Static Constraint Test ---
 
-def test_static_constraint_max_atoms_removed():
+def test_static_constraint_max_atoms():
     """
-    Test that config validation NO LONGER catches supercell settings based on volume factor.
-    This validation was removed as it was inaccurate.
-    Runtime validation in BaseGenerator handles the actual atom count check.
+    Test that config validation catches supercell settings that would exceed max_atoms.
     """
     config = AlloySystemConfig(
         type="alloy",
         elements=["Fe"],
-        supercell_size=[5, 5, 5],
-        constraints=PhysicsConstraints(max_atoms=100) # 125 > 100, would fail old check
+        supercell_size=[4, 4, 4],
+        constraints=PhysicsConstraints(max_atoms=200)
     )
-    assert config.supercell_size == [5, 5, 5]
+    assert config.supercell_size == [4, 4, 4]
+
+    with pytest.raises(ValidationError) as excinfo:
+        AlloySystemConfig(
+            type="alloy",
+            elements=["Fe"],
+            supercell_size=[5, 5, 5],
+            constraints=PhysicsConstraints(max_atoms=100)
+        )
+    assert "exceeding max_atoms" in str(excinfo.value)
 
 # --- 2. Dynamic Filter Test ---
 
