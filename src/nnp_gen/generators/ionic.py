@@ -12,7 +12,7 @@ class IonicGenerator(BaseGenerator):
         super().__init__(config)
         self.config = config
 
-    def generate(self) -> List[Atoms]:
+    def _generate_impl(self) -> List[Atoms]:
         """
         Generates ionic structures maintaining charge balance.
         """

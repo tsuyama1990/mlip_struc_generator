@@ -11,7 +11,7 @@ class CovalentGenerator(BaseGenerator):
         super().__init__(config)
         self.config = config
 
-    def generate(self) -> List[Atoms]:
+    def _generate_impl(self) -> List[Atoms]:
         """
         Generates covalent structures using random symmetry groups (PyXTal).
         """

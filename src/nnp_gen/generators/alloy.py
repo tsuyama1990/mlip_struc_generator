@@ -11,7 +11,7 @@ class AlloyGenerator(BaseGenerator):
         super().__init__(config)
         self.config = config
 
-    def generate(self) -> List[Atoms]:
+    def _generate_impl(self) -> List[Atoms]:
         """
         Generates alloy structures using SQS (via icet) or random substitution.
         """
