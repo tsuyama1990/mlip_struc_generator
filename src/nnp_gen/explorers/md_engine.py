@@ -42,6 +42,10 @@ def _get_calculator(model_name: str, device: str):
         except ImportError:
              raise ImportError("sevenn not found")
 
+    elif model_name == "emt":
+        from ase.calculators.emt import EMT
+        return EMT()
+
     else:
         raise ImportError(f"Unknown model: {model_name}")
 
@@ -141,7 +145,7 @@ class MDExplorer:
         interval = max(1, steps // 50)
 
         # Default params (should be configurable, but keeping simple as per current code)
-        calc_params = {"model_name": "mace", "device": "cpu"}
+        calc_params = {"model_name": self.config.exploration.model_name, "device": "cpu"}
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = []

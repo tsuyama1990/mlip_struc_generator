@@ -1,6 +1,6 @@
 from typing import Literal, Union, List, Dict, Optional, Tuple
 import numpy as np
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 # --- System Configuration ---
 
@@ -17,6 +17,22 @@ class BaseSystemConfig(BaseModel):
     pbc: List[bool] = Field([True, True, True], description="Periodic Boundary Conditions")
     rattle_std: float = Field(0.01, description="Standard deviation for Gaussian rattle in Angstrom")
     vol_scale_range: List[float] = Field([0.95, 1.05], min_length=2, max_length=2, description="Min/Max scaling factors for volume augmentation")
+
+    @field_validator('rattle_std')
+    @classmethod
+    def validate_rattle_std(cls, v: float) -> float:
+        if not (0.0 <= v <= 0.5):
+            raise ValueError(f"rattle_std must be between 0.0 and 0.5 Angstrom, got {v}")
+        return v
+
+    @field_validator('vol_scale_range')
+    @classmethod
+    def validate_vol_scale_range(cls, v: List[float]) -> List[float]:
+        if v[0] > v[1]:
+            raise ValueError("vol_scale_range min must be less than or equal to max")
+        if any(x <= 0 for x in v):
+            raise ValueError("vol_scale_range values must be positive")
+        return v
 
 class IonicSystemConfig(BaseSystemConfig):
     type: Literal["ionic"] = "ionic"
@@ -56,10 +72,32 @@ SystemConfig = Union[
 
 class ExplorationConfig(BaseModel):
     method: Literal["md", "mc", "hybrid_mc_md", "melt_quench", "normal_mode"] = Field("md", description="Exploration method")
+    model_name: Literal["mace", "sevenn", "emt"] = Field("mace", description="Calculator model name")
     temperature: float = Field(300.0, description="Temperature in Kelvin")
     pressure: Optional[float] = Field(None, description="Pressure in GPa (None for NVT)")
     steps: int = Field(1000, description="Number of steps per exploration run")
     timestep: float = Field(1.0, description="Timestep in fs")
+
+    @field_validator('temperature')
+    @classmethod
+    def validate_temperature(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Temperature must be positive")
+        return v
+
+    @field_validator('steps')
+    @classmethod
+    def validate_steps(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Steps must be positive")
+        return v
+
+    @field_validator('timestep')
+    @classmethod
+    def validate_timestep(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Timestep must be positive")
+        return v
 
 # --- Sampling Configuration ---
 
