@@ -19,6 +19,17 @@ class BaseSystemConfig(BaseModel):
     rattle_std: float = Field(0.01, description="Standard deviation for Gaussian rattle in Angstrom")
     vol_scale_range: List[float] = Field([0.95, 1.05], min_length=2, max_length=2, description="Min/Max scaling factors for volume augmentation")
 
+    @field_validator('elements')
+    @classmethod
+    def validate_elements(cls, v: List[str]) -> List[str]:
+        from ase.data import chemical_symbols
+        # chemical_symbols[0] is 'X', [1] is 'H'.
+        valid_symbols = set(chemical_symbols)
+        for el in v:
+            if el not in valid_symbols:
+                raise ValueError(f"Invalid element symbol: {el}")
+        return v
+
     @field_validator('rattle_std')
     @classmethod
     def validate_rattle_std(cls, v: float) -> float:

@@ -9,8 +9,15 @@ from ase import units
 from ase.data import covalent_radii
 from tqdm import tqdm
 from nnp_gen.core.interfaces import IExplorer
+import signal
 
 logger = logging.getLogger(__name__)
+
+class TimeoutError(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutError("MD simulation timed out")
 
 def _get_calculator(model_name: str, device: str):
     """
@@ -55,12 +62,17 @@ def run_single_md(
     temp: float,
     steps: int,
     interval: int,
-    calculator_params: Dict[str, Any]
+    calculator_params: Dict[str, Any],
+    timeout_seconds: int = 3600
 ) -> Optional[List[Atoms]]:
     """
     Run a single MD trajectory.
     Defined as standalone function to ensure picklability.
     """
+    # Setup timeout
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout_seconds)
+
     try:
         # Setup calculator
         model_name = calculator_params.get("model_name", "mace")
@@ -125,10 +137,15 @@ def run_single_md(
         # Expected explosion
         logger.warning(f"MD Exploration Failed (RuntimeError): {e}")
         return None
+    except TimeoutError as e:
+        logger.error(f"MD Exploration Timeout: {e}")
+        return None
     except Exception as e:
         # Unexpected error
         logger.error(f"MD Exploration Error: {e}")
         return None
+    finally:
+        signal.alarm(0)  # Cancel alarm
 
 class MDExplorer(IExplorer):
     def __init__(self, config: Any):
@@ -152,7 +169,7 @@ class MDExplorer(IExplorer):
             futures = []
             for seed in seeds:
                 futures.append(
-                    executor.submit(run_single_md, seed, temp, steps, interval, calc_params)
+                    executor.submit(run_single_md, seed, temp, steps, interval, calc_params, 3600)
                 )
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(seeds), desc="MD Exploration"):

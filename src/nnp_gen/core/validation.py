@@ -3,6 +3,7 @@ import logging
 import numpy as np
 from ase import Atoms
 from ase.neighborlist import neighbor_list
+from ase.units import _amu
 from nnp_gen.core.config import PhysicsConstraints
 
 logger = logging.getLogger(__name__)
@@ -169,17 +170,14 @@ class StructureValidator:
              return False
 
         total_mass = sum(atoms.get_masses()) # amu
-        # 1 amu/A^3 = 1.66053906660 g/cm^3
-        # Use constant from user provided memory if needed, or ASE units?
-        # User memory says: "Density calculation uses the value 1.66053906660"
-        # User prompt says: "while correct, ase.units should be used"
-        # ase.units.mol = 6.022...e23
-        # 1 amu = 1/N_A g = 1.6605...e-24 g
-        # 1 A^3 = 1e-24 cm^3
-        # So conversion is 1.6605...
-        # Let's stick to the memory constant or explicit calculation, but make it clear.
 
-        conversion_factor = 1.66053906660
+        # Calculate conversion factor using ASE units
+        # 1 amu = _amu kg = _amu * 1000 g
+        # 1 Angstrom^3 = 1e-24 cm^3
+        AMU_TO_G = _amu * 1.0e3
+        A3_TO_CM3 = 1.0e-24
+        conversion_factor = AMU_TO_G / A3_TO_CM3
+
         density = (total_mass / vol) * conversion_factor
 
         if density < self.constraints.min_density:
