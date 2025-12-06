@@ -116,6 +116,13 @@ class StructureValidator:
 
         total_mass = sum(atoms.get_masses()) # amu
 
+        # Calculate conversion factor using ASE units
+        # 1 amu = _amu kg = _amu * 1000 g
+        # 1 Angstrom^3 = 1e-24 cm^3
+        AMU_TO_G = _amu * 1.0e3
+        A3_TO_CM3 = 1.0e-24
+        conversion_factor = AMU_TO_G / A3_TO_CM3
+
         density = (total_mass / vol) * conversion_factor
 
         if density < self.constraints.min_density:

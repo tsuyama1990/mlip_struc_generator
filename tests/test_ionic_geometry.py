@@ -12,8 +12,8 @@ class TestIonicGeometry:
     def config(self):
         return IonicSystemConfig(
             name="test",
-            elements=["A", "B"],
-            oxidation_states={"A": 1, "B": -1},
+            elements=["Na", "Cl"],
+            oxidation_states={"Na": 1, "Cl": -1},
             supercell_size=[1, 1, 1],
             rattle_std=0.0,
             vol_scale_range=[1.0, 1.0] # No strain
@@ -34,7 +34,7 @@ class TestIonicGeometry:
 
         # Mock radii
         # R_A = 1.0, R_B = 2.0 -> Sum = 3.0
-        with patch.object(generator, '_get_heuristic_radius', side_effect=lambda s, c: 1.0 if s == "A" else 2.0):
+        with patch.object(generator, '_get_heuristic_radius', side_effect=lambda s, c: 1.0 if s == "Na" else 2.0):
 
             # Mock _pmg_to_ase to simply return an Atoms object with the cell
             # because we can't easily mock the complex pymatgen Structure logic fully
@@ -49,7 +49,7 @@ class TestIonicGeometry:
 
             # Test Rocksalt
             # a = 2 * sum = 6.0
-            generator._create_binary_prototypes("A", "B", radii_sum, ["rocksalt"])
+            generator._create_binary_prototypes("Na", "Cl", radii_sum, ["rocksalt"])
 
             # Check arguments to Lattice.cubic(a)
             # The structure creation is: self.pmg.Structure.from_spacegroup("Fm-3m", self.Lattice.cubic(a), ...)
@@ -67,7 +67,7 @@ class TestIonicGeometry:
 
             # Test CsCl
             # a = 2/sqrt(3) * sum approx 1.1547 * 3.0 = 3.464
-            generator._create_binary_prototypes("A", "B", radii_sum, ["cscl"])
+            generator._create_binary_prototypes("Na", "Cl", radii_sum, ["cscl"])
             args, _ = generator.Lattice.cubic.call_args_list[-1]
             a_cscl = args[0]
             expected_cscl = (2.0 / np.sqrt(3.0)) * radii_sum
@@ -75,7 +75,7 @@ class TestIonicGeometry:
 
             # Test Zincblende
             # a = 4/sqrt(3) * sum approx 2.309 * 3.0 = 6.928
-            generator._create_binary_prototypes("A", "B", radii_sum, ["zincblende"])
+            generator._create_binary_prototypes("Na", "Cl", radii_sum, ["zincblende"])
             args, _ = generator.Lattice.cubic.call_args_list[-1]
             a_zb = args[0]
             expected_zb = (4.0 / np.sqrt(3.0)) * radii_sum
@@ -89,7 +89,7 @@ class TestIonicGeometry:
         generator.has_pmg = True
 
         # Mock _get_radius to return known radii
-        with patch.object(generator, '_get_heuristic_radius', side_effect=lambda s, c: 1.5 if s == "A" else 0.5):
+        with patch.object(generator, '_get_heuristic_radius', side_effect=lambda s, c: 1.5 if s == "Na" else 0.5):
             # Sum should be 2.0
             # Mock _create_binary_prototypes to capture the passed sum
             with patch.object(generator, '_create_binary_prototypes') as mock_create:

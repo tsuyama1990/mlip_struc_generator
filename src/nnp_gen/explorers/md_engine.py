@@ -99,6 +99,7 @@ def run_single_md_thread(
     steps: int,
     interval: int,
     calc_pool: CalculatorPool,
+    calculator_params: Dict[str, Any],
     timeout_seconds: int = 3600
 ) -> Optional[List[Atoms]]:
     """
@@ -119,6 +120,9 @@ def run_single_md_thread(
 
     import time
     start_time = time.time()
+    # Setup timeout
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout_seconds)
 
     try:
         with calc_pool.get_calculator() as calc:
@@ -183,9 +187,14 @@ def run_single_md_thread(
     except RuntimeError as e:
         logger.warning(f"MD Exploration Failed (RuntimeError): {e}")
         return None
+    except TimeoutError as e:
+        logger.error(f"MD Exploration Timeout: {e}")
+        return None
     except Exception as e:
         logger.error(f"MD Exploration Error: {e}")
         return None
+    finally:
+        signal.alarm(0)  # Cancel alarm
 
 def _calculate_max_workers(n_atoms_estimate: int = 1000) -> int:
     """
