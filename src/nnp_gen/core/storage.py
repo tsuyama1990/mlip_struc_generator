@@ -4,8 +4,9 @@ from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 import numpy as np
 from nnp_gen.core.models import StructureMetadata
+from nnp_gen.core.interfaces import IStorage
 
-class DatabaseManager:
+class DatabaseManager(IStorage):
     """
     Manager for ASE Database persistence with Pydantic metadata validation.
     """
