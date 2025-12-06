@@ -106,15 +106,91 @@ def ensure_supercell_size(atoms: Atoms, r_cut: float, factor: float = 1.0) -> At
         return atoms
 
     l_min = r_cut * factor
-    cell_lengths = atoms.cell.lengths()
+
+    # Calculate cell parameters (lengths and angles) or use cell perpendicular widths
+    # For orthogonal cells, lengths are enough. For triclinic, we need perpendicular widths.
+    # ASE doesn't have a direct "perpendicular width" function easily accessible for all cases without geometry.
+    # But we can iterate.
+
+    # Logic:
+    # 1. Start with repeat=[1,1,1]
+    # 2. Check if current supercell has all perpendicular widths >= l_min
+    # 3. If not, increase repeat in the deficient direction
+    # This might be iterative.
+
+    # Simplified approach:
+    # Calculate heights of the parallelepiped.
+    # h_i = Volume / Area_i
+    # This works for general cells.
+
+    cell = atoms.cell
+    vol = abs(atoms.get_volume())
+
+    # Calculate cross products of vectors to get areas of faces
+    # v0, v1, v2
+    v = cell.array
+
+    # area_0 (defined by v1, v2) = |v1 x v2|
+    # area_1 (defined by v0, v2) = |v0 x v2|
+    # area_2 (defined by v0, v1) = |v0 x v1|
 
     repeat = [1, 1, 1]
+
+    # Pre-check simple lengths first to get a baseline (fast)
+    lengths = cell.lengths()
     for i in range(3):
-        if atoms.pbc[i]:
-            if cell_lengths[i] < 1e-6:
-                repeat[i] = 1
-            else:
-                repeat[i] = max(1, int(ceil(l_min / cell_lengths[i])))
+        if atoms.pbc[i] and lengths[i] > 1e-6:
+             repeat[i] = max(1, int(ceil(l_min / lengths[i])))
+
+    # Refine for skewed cells
+    # We apply the current repeat and check widths
+
+    # We do a small loop to ensure convergence (usually 1 pass is enough unless very skewed)
+    for _ in range(3):
+        current_cell = (atoms.cell.array.T * np.array(repeat)).T # Scale vectors
+        current_vol = np.abs(np.linalg.det(current_cell))
+
+        # Recalculate widths
+        # Width 0: distance between faces spanned by v1, v2.
+        # w0 = Vol / |v1 x v2|
+        # etc.
+
+        v = current_cell
+
+        # areas
+        areas = [
+            np.linalg.norm(np.cross(v[1], v[2])), # area normal to v0
+            np.linalg.norm(np.cross(v[0], v[2])), # area normal to v1
+            np.linalg.norm(np.cross(v[0], v[1]))  # area normal to v2
+        ]
+
+        converged = True
+        for i in range(3):
+            if atoms.pbc[i]:
+                if areas[i] > 1e-6:
+                    w = current_vol / areas[i]
+                else:
+                    w = 0.0
+
+                # Protection against division by zero if w is very small
+                if w < 1e-9:
+                     # Degenerate cell or very flat. Cannot expand properly based on volume.
+                     # Just assume it's bad and maybe try to expand but scale would be infinite.
+                     # We skip expansion update to avoid crash/inf.
+                     continue
+
+                if w < l_min - 1e-4: # epsilon tolerance
+                    # We need to increase repeat[i]
+                    # Scaling factor needed: l_min / w
+                    # We multiply current repeat by this factor
+                    # new_repeat = old_repeat * (l_min / w)
+                    # But we only increment by integer steps.
+                    scale = l_min / w
+                    repeat[i] = int(ceil(repeat[i] * scale))
+                    converged = False
+
+        if converged:
+            break
 
     if repeat == [1, 1, 1]:
         return atoms.copy()

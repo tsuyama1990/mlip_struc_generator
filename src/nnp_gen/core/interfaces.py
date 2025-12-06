@@ -10,6 +10,7 @@ from nnp_gen.core.physics import (
     set_initial_magmoms,
     ensure_supercell_size
 )
+from nnp_gen.core.exceptions import GenerationError
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,18 @@ class BaseGenerator(ABC):
 
         Returns:
             List[Atoms]: A list of valid ASE Atoms objects.
+
+        Raises:
+            GenerationError: If underlying generation logic fails.
         """
-        raw_structures = self._generate_impl()
+        try:
+            raw_structures = self._generate_impl()
+        except GenerationError:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in generator: {e}")
+            raise GenerationError(f"Generation failed: {e}")
+
         valid_structures = []
 
         for i, atoms in enumerate(raw_structures):
