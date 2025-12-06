@@ -109,6 +109,52 @@ class StructureValidator:
         if not any(atoms.pbc):
             return True
 
+        # Also skip density check if the system has vacuum (is a slab)
+        # Slabs typically have vacuum in the Z direction (pbc[2]=True often, but empty space)
+        # Heuristic: Check if vacuum layers exist or if pbc suggests 2D?
+        # But standard slabs have pbc=[True, True, True].
+        # User prompt says: "If system is 2D (has vacuum), skip the bulk density check"
+        # How to detect "has vacuum"?
+        # One way is to check the config type if we had access to it, but here we only have atoms.
+        # However, we can check if there's a large empty region in Z?
+        # Or we can relax density check if density is suspiciously low but structure is valid otherwise?
+        # But we don't want to accept exploded bulk.
+
+        # Best approach given the architecture:
+        # If we can't access config type here, maybe we should trust the generator to not produce bad density
+        # unless it's a slab?
+        # BUT, the prompt explicitly says: "Update validate_structure in validation.py. Logic: If system is 2D (has vacuum), skip the bulk density check or use a modified "Planar Density" check."
+
+        # How to detect 2D/Slab from 'atoms' object?
+        # A common heuristic for slab in 3D PBC: Large empty space in one direction.
+        # Let's check vacuum fraction in Z?
+        # Or simply check if the calculated density is low but we are in a 'valid low density' regime?
+        # That's risky.
+
+        # Better: Check if atoms.info has a flag?
+        # We can set atoms.info['system_type'] in the generator.
+        # But let's look for a purely geometric heuristic as requested if possible.
+        # "If system is 2D (has vacuum)"
+
+        # Let's check for vacuum gap in Z direction > 5A?
+        positions = atoms.get_positions()
+        if len(positions) > 0:
+            z_coords = np.sort(positions[:, 2])
+            z_diffs = np.diff(z_coords)
+            # Check for large gap (vacuum) in sorted Z coordinates, taking PBC into account (gap between top and bottom image)
+            # cell_z = atoms.cell[2, 2]
+            # gap_pbc = cell_z - (z_coords[-1] - z_coords[0])
+
+            # If gap_pbc > 5.0 (arbitrary vacuum size), it's likely a slab.
+            # Let's use 5.0A as a threshold for vacuum detection.
+
+            cell_z = atoms.get_cell()[2][2]
+            if z_coords.size > 1:
+                vacuum_size = cell_z - (z_coords[-1] - z_coords[0])
+                if vacuum_size > 5.0:
+                    # Likely a slab/surface with vacuum
+                    return True
+
         # Density check
         try:
             vol = atoms.get_volume()

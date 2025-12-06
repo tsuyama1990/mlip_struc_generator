@@ -5,6 +5,7 @@ from nnp_gen.generators.ionic import IonicGenerator
 from nnp_gen.generators.covalent import CovalentGenerator
 from nnp_gen.generators.molecule import MoleculeGenerator
 from nnp_gen.generators.interface import InterfaceGenerator
+from nnp_gen.generators.adsorption import VacuumAdsorbateGenerator, SolventAdsorbateGenerator
 
 class GeneratorFactory:
     """
@@ -34,5 +35,9 @@ class GeneratorFactory:
             return MoleculeGenerator(config)
         elif config.type == "interface":
             return InterfaceGenerator(config)
+        elif config.type == "vacuum_adsorbate":
+            return VacuumAdsorbateGenerator(config)
+        elif config.type == "solvent_adsorbate":
+            return SolventAdsorbateGenerator(config)
         else:
             raise ValueError(f"Unknown system type: {config.type}")

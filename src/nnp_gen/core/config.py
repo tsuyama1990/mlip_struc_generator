@@ -102,13 +102,68 @@ class InterfaceSystemConfig(BaseSystemConfig):
                     data['elements'] = list(elems)
         return data
 
+class AdsorbateMode(str, Enum):
+    ATOM = "atom"
+    MOLECULE = "molecule"
+    SMILES = "smiles"
+    FILE = "file"
+
+class AdsorbateConfig(BaseModel):
+    source: str = Field(..., description="Element symbol, Formula, SMILES, or Filepath")
+    mode: AdsorbateMode = Field(..., description="Interpretation of the source string")
+    count: int = Field(1, ge=1, description="Number of adsorbates to place")
+    height: float = Field(2.0, description="Height above the surface")
+
+    @field_validator('count')
+    @classmethod
+    def validate_count(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("Count must be at least 1")
+        return v
+
+class VacuumAdsorbateSystemConfig(BaseSystemConfig):
+    type: Literal["vacuum_adsorbate"] = "vacuum_adsorbate"
+    substrate: Dict[str, Any] = Field(..., description="Configuration for the bulk substrate")
+    miller_indices: List[Tuple[int, int, int]] = Field(..., description="List of Miller indices to cleave")
+    layers: int = Field(4, description="Number of atomic layers in the slab")
+    vacuum: float = Field(10.0, description="Vacuum size on top of the surface")
+    defect_rate: float = Field(0.0, ge=0.0, le=1.0, description="Fraction of top-layer atoms to remove")
+    adsorbates: List[AdsorbateConfig] = Field(default_factory=list, description="List of adsorbates to place")
+
+    @field_validator('defect_rate')
+    @classmethod
+    def validate_defect_rate(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+             raise ValueError("defect_rate must be between 0.0 and 1.0")
+        return v
+
+    @model_validator(mode='before')
+    @classmethod
+    def extract_elements(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if 'elements' not in data or not data['elements']:
+                elems = set()
+                # Substrate elements
+                if 'substrate' in data and isinstance(data['substrate'], dict):
+                     elems.update(data['substrate'].get('elements', []))
+                if elems:
+                    data['elements'] = list(elems)
+        return data
+
+class SolventAdsorbateSystemConfig(VacuumAdsorbateSystemConfig):
+    type: Literal["solvent_adsorbate"] = "solvent_adsorbate"
+    solvent_density: float = Field(1.0, description="Target solvent density in g/cm^3")
+    solvent_smiles: str = Field("O", description="SMILES string for the solvent (default Water)")
+
 # Discriminated Union for System Config
 SystemConfig = Union[
     IonicSystemConfig,
     AlloySystemConfig,
     CovalentSystemConfig,
     MoleculeSystemConfig,
-    InterfaceSystemConfig
+    InterfaceSystemConfig,
+    VacuumAdsorbateSystemConfig,
+    SolventAdsorbateSystemConfig
 ]
 
 # --- Exploration Configuration ---
