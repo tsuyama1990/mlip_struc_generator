@@ -8,6 +8,7 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase import units
 from ase.data import covalent_radii
 from tqdm import tqdm
+from nnp_gen.core.interfaces import IExplorer
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ def run_single_md(
         logger.error(f"MD Exploration Error: {e}")
         return None
 
-class MDExplorer:
+class MDExplorer(IExplorer):
     def __init__(self, config: Any):
         self.config = config
 

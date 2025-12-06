@@ -3,6 +3,7 @@ from typing import List, Optional
 from ase import Atoms
 from scipy.spatial.distance import cdist
 import logging
+from nnp_gen.core.interfaces import ISampler
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class DescriptorManager:
 
         return np.array(features)
 
-class FPSSampler:
+class FPSSampler(ISampler):
     def __init__(self, descriptor_manager: DescriptorManager):
         self.desc_mgr = descriptor_manager
 
@@ -116,7 +117,7 @@ class FPSSampler:
 
         return [structures[i] for i in selected_indices]
 
-class RandomSampler:
+class RandomSampler(ISampler):
     def sample(self, structures: List[Atoms], n_samples: int) -> List[Atoms]:
         n_total = len(structures)
         if n_samples >= n_total:

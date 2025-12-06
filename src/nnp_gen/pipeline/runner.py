@@ -2,30 +2,62 @@ import logging
 import os
 from typing import List, Optional
 from ase import Atoms
-from ase.io import write
+
 from nnp_gen.core.config import AppConfig
 from nnp_gen.core.models import StructureMetadata
-from nnp_gen.core.storage import DatabaseManager
+from nnp_gen.core.interfaces import IExplorer, ISampler, IStorage, IExporter, BaseGenerator
 from nnp_gen.generators.factory import GeneratorFactory
 from nnp_gen.explorers.md_engine import MDExplorer
 from nnp_gen.samplers.selector import FPSSampler, RandomSampler, DescriptorManager
+from nnp_gen.core.storage import DatabaseManager
+from nnp_gen.core.io import ASEExporter
 
 logger = logging.getLogger(__name__)
 
 class PipelineRunner:
-    def __init__(self, config: AppConfig):
+    def __init__(
+        self,
+        config: AppConfig,
+        generator: Optional[BaseGenerator] = None,
+        explorer: Optional[IExplorer] = None,
+        sampler: Optional[ISampler] = None,
+        storage: Optional[IStorage] = None,
+        exporter: Optional[IExporter] = None
+    ):
         self.config = config
-        self.db_path = os.path.join(self.config.output_dir, "dataset.db")
         os.makedirs(self.config.output_dir, exist_ok=True)
-        self.db_manager = DatabaseManager(self.db_path)
 
-    def export_xyz(self, structures: List[Atoms], output_path: str):
-        """Export list of structures to XYZ format."""
-        try:
-            write(output_path, structures)
-            logger.info(f"Exported {len(structures)} structures to {output_path}")
-        except Exception as e:
-            logger.error(f"Failed to export structures to {output_path}: {e}")
+        # Dependency Injection with Defaults
+        self.generator = generator or GeneratorFactory.get_generator(self.config.system)
+
+        if explorer:
+            self.explorer = explorer
+        else:
+             if self.config.exploration.method == "md":
+                self.explorer = MDExplorer(self.config)
+             else:
+                self.explorer = None # Or a NullExplorer
+
+        if sampler:
+             self.sampler = sampler
+        else:
+            # Factory logic for sampler could be extracted too
+            if self.config.sampling.strategy == "fps":
+                desc_mgr = DescriptorManager(rcut=self.config.system.constraints.r_cut)
+                self.sampler = FPSSampler(desc_mgr)
+            elif self.config.sampling.strategy == "random":
+                self.sampler = RandomSampler()
+            else:
+                self.sampler = None
+
+        if storage:
+            self.storage = storage
+        else:
+             db_path = os.path.join(self.config.output_dir, "dataset.db")
+             self.storage = DatabaseManager(db_path)
+
+        self.exporter = exporter or ASEExporter()
+
 
     def run(self):
         logger.info("Starting Pipeline...")
@@ -33,13 +65,12 @@ class PipelineRunner:
         # 1. Initialization / Generation
         logger.info("Step 1: Structure Generation")
         try:
-            generator = GeneratorFactory.get_generator(self.config.system)
-            initial_structures = generator.generate()
+            initial_structures = self.generator.generate()
             logger.info(f"Generated {len(initial_structures)} initial structures.")
 
             # Checkpoint
             if initial_structures:
-                self.export_xyz(initial_structures, os.path.join(self.config.output_dir, "initial_structures.xyz"))
+                self.exporter.export(initial_structures, os.path.join(self.config.output_dir, "initial_structures.xyz"))
 
         except Exception as e:
             logger.error(f"Generation failed: {e}")
@@ -50,14 +81,12 @@ class PipelineRunner:
             return
 
         # 2. Exploration (MD)
-        logger.info("Step 2: MD Exploration")
-        if self.config.exploration.method == "md":
-            explorer = MDExplorer(self.config)
+        logger.info("Step 2: Exploration")
+        if self.explorer:
             n_workers = max(1, os.cpu_count() // 2 if os.cpu_count() else 1)
-            # MDExplorer returns flat list of Atoms
-            explored_structures = explorer.explore(initial_structures, n_workers=n_workers)
+            explored_structures = self.explorer.explore(initial_structures, n_workers=n_workers)
         else:
-             logger.warning(f"Exploration method {self.config.exploration.method} not implemented/supported. Using initial structures.")
+             logger.warning(f"Exploration method {self.config.exploration.method} not implemented/supported or disabled. Using initial structures.")
              explored_structures = initial_structures
 
         # If exploration returns empty (e.g. all exploded), we might fallback or abort
@@ -66,7 +95,7 @@ class PipelineRunner:
             explored_structures = initial_structures
 
         # Checkpoint
-        self.export_xyz(explored_structures, os.path.join(self.config.output_dir, "explored_structures.xyz"))
+        self.exporter.export(explored_structures, os.path.join(self.config.output_dir, "explored_structures.xyz"))
 
         logger.info(f"Total structures after exploration: {len(explored_structures)}")
 
@@ -77,13 +106,8 @@ class PipelineRunner:
 
         sampled_structures = []
         if explored_structures:
-            if sampling_config.strategy == "fps":
-                desc_mgr = DescriptorManager(rcut=self.config.system.constraints.r_cut)
-                sampler = FPSSampler(desc_mgr)
-                sampled_structures = sampler.sample(explored_structures, n_samples)
-            elif sampling_config.strategy == "random":
-                sampler = RandomSampler()
-                sampled_structures = sampler.sample(explored_structures, n_samples)
+            if self.sampler:
+                sampled_structures = self.sampler.sample(explored_structures, n_samples)
             else:
                 logger.info("Manual sampling or unknown strategy, keeping all.")
                 sampled_structures = explored_structures
@@ -110,11 +134,11 @@ class PipelineRunner:
             metadata_list.append(meta)
 
         try:
-            saved_ids = self.db_manager.bulk_save(sampled_structures, metadata_list)
-            logger.info(f"Saved {len(saved_ids)} structures to {self.db_path}")
+            saved_ids = self.storage.bulk_save(sampled_structures, metadata_list)
+            logger.info(f"Saved {len(saved_ids)} structures to database.")
 
             # Export sampled structures
-            self.export_xyz(sampled_structures, os.path.join(self.config.output_dir, "sampled_structures.xyz"))
+            self.exporter.export(sampled_structures, os.path.join(self.config.output_dir, "sampled_structures.xyz"))
 
         except Exception as e:
             logger.error(f"Database save failed: {e}")

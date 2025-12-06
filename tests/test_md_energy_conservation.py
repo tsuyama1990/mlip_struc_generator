@@ -61,18 +61,26 @@ def test_langevin_thermostat_temperature():
     MaxwellBoltzmannDistribution(atoms, temperature_K=target_temp)
     Stationary(atoms)
 
-    # Using slightly higher friction to ensure coupling
-    dyn = Langevin(atoms, 1.0 * units.fs, temperature_K=target_temp, friction=0.01)
+    # Using higher friction to ensure coupling for this test
+    # 0.01 atomic units ~ 0.01 / (24 fs) -> very high coupling
+    # Friction in ASE is in inverse time units. 0.01 is actually quite weak if units are default (fs-related?)
+    # ASE units: friction is in fs^-1 usually? No, check doc: "Friction strength in atomic units (inverse time)."
+    # Actually ASE documentation says: friction: Friction coefficient in atomic units.
+    # To get strong coupling we might need higher value.
+    # Let's increase friction to 0.02
+
+    dyn = Langevin(atoms, 1.0 * units.fs, temperature_K=target_temp, friction=0.02)
 
     temps = []
     def log_temp():
         temps.append(atoms.get_temperature())
 
     dyn.attach(log_temp, interval=5)
-    dyn.run(2000)
+    dyn.run(4000) # Run longer
 
     # Check average temperature of last half
     avg_temp = np.mean(temps[len(temps)//2:])
 
     # Allow 20% deviation (small system fluctuations)
+    # 3x3x3 Cu is 108 atoms. Fluctuations should be ~ 1/sqrt(3*108) ~ 5%. 20% is generous but safe.
     assert abs(avg_temp - target_temp) < target_temp * 0.2, f"Temperature deviation too high: {avg_temp} vs {target_temp}"

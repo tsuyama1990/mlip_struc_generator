@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 import logging
 import numpy as np
 from ase import Atoms
-from nnp_gen.core.config import SystemConfig
+from nnp_gen.core.config import SystemConfig, AppConfig
 from nnp_gen.core.physics import (
     apply_rattle,
     apply_volumetric_strain,
@@ -11,6 +11,7 @@ from nnp_gen.core.physics import (
     ensure_supercell_size
 )
 from nnp_gen.core.exceptions import GenerationError
+from nnp_gen.core.models import StructureMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -135,3 +136,27 @@ class BaseGenerator(ABC):
             pass
 
         return True
+
+class IExplorer(ABC):
+    """Interface for exploration methods (e.g., MD)."""
+    @abstractmethod
+    def explore(self, structures: List[Atoms], n_workers: int = 1) -> List[Atoms]:
+        pass
+
+class ISampler(ABC):
+    """Interface for sampling strategies."""
+    @abstractmethod
+    def sample(self, structures: List[Atoms], n_samples: int) -> List[Atoms]:
+        pass
+
+class IStorage(ABC):
+    """Interface for database storage."""
+    @abstractmethod
+    def bulk_save(self, structures: List[Atoms], metadata: List[StructureMetadata]) -> List[int]:
+        pass
+
+class IExporter(ABC):
+    """Interface for file exporting."""
+    @abstractmethod
+    def export(self, structures: List[Atoms], output_path: str):
+        pass

@@ -18,7 +18,11 @@ dependencies = [
     "numpy>=1.24,<2.0",
     "tqdm",
     "scipy>=1.10,<2.0",
-    "torch"
+    "torch",
+    "panel>=1.8.4",
+    "param>=2.3.1",
+    "scikit-learn>=1.7.2",
+    "pymatgen>=2025.10.7",
 ]
 
 [project.optional-dependencies]
@@ -33,3 +37,9 @@ molecule = ["rdkit"]
 ml-calculators = ["mace-torch", "sevenn", "matgl", "chgnet"]
 descriptors = ["dscribe"]
 all = ["pymatgen", "icet", "pyxtal", "rdkit", "mace-torch", "sevenn", "matgl", "chgnet", "dscribe"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+    "pytest-mock>=3.15.1",
+]
