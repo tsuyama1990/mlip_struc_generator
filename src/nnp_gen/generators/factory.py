@@ -1,0 +1,35 @@
+from nnp_gen.core.config import SystemConfig
+from nnp_gen.core.interfaces import BaseGenerator
+from nnp_gen.generators.alloy import AlloyGenerator
+from nnp_gen.generators.ionic import IonicGenerator
+from nnp_gen.generators.covalent import CovalentGenerator
+from nnp_gen.generators.molecule import MoleculeGenerator
+
+class GeneratorFactory:
+    """
+    Factory class to instantiate the appropriate Generator based on SystemConfig.
+    """
+    @staticmethod
+    def get_generator(config: SystemConfig) -> BaseGenerator:
+        """
+        Returns an instance of a BaseGenerator subclass.
+
+        Args:
+            config (SystemConfig): The system configuration.
+
+        Returns:
+            BaseGenerator: The generator instance.
+
+        Raises:
+            ValueError: If the config type is unknown.
+        """
+        if config.type == "alloy":
+            return AlloyGenerator(config)
+        elif config.type == "ionic":
+            return IonicGenerator(config)
+        elif config.type == "covalent":
+            return CovalentGenerator(config)
+        elif config.type == "molecule":
+            return MoleculeGenerator(config)
+        else:
+            raise ValueError(f"Unknown system type: {config.type}")

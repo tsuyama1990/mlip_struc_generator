@@ -1,7 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "mlip-str-gen"
+name = "nnp_gen"
 version = "0.1.0"
-description = "Add your description here"
+description = "Neural Network Potential Dataset Generation Pipeline"
+authors = [
+  { name = "Jules", email = "jules@example.com" },
+]
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "hydra-core",
+    "ase",
+    "numpy",
+    "tqdm",
+    "scipy",
+    # Heavy scientific libraries (listed but strictly treated as optional/mocked for now)
+    "pymatgen",
+    "pyxtal",
+    "icet",
+    "rdkit",
+    "matgl",
+    "chgnet",
+    "dscribe"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-mock"
+]
