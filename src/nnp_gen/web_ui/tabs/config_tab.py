@@ -10,6 +10,8 @@ from nnp_gen.core.config import (
     ExplorationConfig, SamplingConfig
 )
 from nnp_gen.web_ui.job_manager import JobManager
+from nnp_gen.generators.ionic import validate_element
+from ase.data import chemical_symbols
 
 class ConfigViewModel(param.Parameterized):
     # --- System Type Selector ---
@@ -40,6 +42,10 @@ class ConfigViewModel(param.Parameterized):
     status_message = param.String(default="Ready")
     logs = param.String(default="", label="Job Logs")
 
+    # --- Progress ---
+    progress_value = param.Integer(default=0, bounds=(0, 100))
+    progress_active = param.Boolean(default=False)
+
     def __init__(self, **params):
         super().__init__(**params)
         self.job_manager = JobManager()
@@ -59,6 +65,31 @@ class ConfigViewModel(param.Parameterized):
             )
         else:
             return pn.pane.Markdown(f"**{self.system_type} configuration not fully implemented in UI demo.**")
+
+    @param.depends("elements_input", watch=True)
+    def validate_elements_realtime(self):
+        """
+        Validate elements input in real-time.
+        """
+        if not self.elements_input:
+            self.status_message = "Ready"
+            return
+
+        elements = [e.strip() for e in self.elements_input.split(",") if e.strip()]
+        invalid = []
+        for el in elements:
+            try:
+                # Basic check, or use validate_element?
+                # Using chemical_symbols check directly to allow UI responsiveness without exceptions
+                if el.capitalize() not in chemical_symbols:
+                    invalid.append(el)
+            except Exception:
+                invalid.append(el)
+
+        if invalid:
+             self.status_message = f"⚠️ Invalid elements: {', '.join(invalid)}"
+        else:
+             self.status_message = "Ready"
 
     def get_pydantic_config(self) -> AppConfig:
         """
@@ -145,21 +176,53 @@ class ConfigViewModel(param.Parameterized):
             self.status_message = f"Error loading config: {e}"
 
     def run_pipeline(self, event=None):
+        # Validate first
+        if "Invalid" in self.status_message:
+            return
+
         try:
+            self.progress_active = True
+            self.progress_value = 0
+
             config = self.get_pydantic_config()
             job_id = self.job_manager.submit_job(config)
             self._last_job_id = job_id
             self.status_message = f"Job {job_id} submitted."
+
         except ValidationError as e:
             self.status_message = f"Validation Error: {e}"
+            self.progress_active = False
         except Exception as e:
             self.status_message = f"Error: {e}"
+            self.progress_active = False
 
     def update_logs(self):
         if self._last_job_id:
             content = self.job_manager.get_log_content(self._last_job_id)
             if content != self.logs:
                 self.logs = content
+
+            # Simple progress heuristic based on logs?
+            # Ideally JobManager exposes status.
+            status = self.job_manager.get_status(self._last_job_id)
+            if status == "running":
+                 # Check logs for keywords
+                 if "Step 1: Structure Generation" in content:
+                     self.progress_value = max(self.progress_value, 25)
+                 if "Step 2: Exploration" in content:
+                     self.progress_value = max(self.progress_value, 50)
+                 if "Step 3: Sampling" in content:
+                     self.progress_value = max(self.progress_value, 75)
+                 if "Step 4: Saving" in content:
+                     self.progress_value = max(self.progress_value, 90)
+            elif status == "completed":
+                self.progress_value = 100
+                self.progress_active = False
+                self.status_message = f"Job {self._last_job_id} Completed."
+            elif status == "failed":
+                self.progress_active = False
+                self.status_message = f"Job {self._last_job_id} Failed."
+
 
 class ConfigTab:
     def __init__(self):
@@ -179,6 +242,13 @@ class ConfigTab:
         # Run Button
         run_btn = pn.widgets.Button(name="Run Pipeline", button_type="primary")
         run_btn.on_click(self.vm.run_pipeline)
+
+        # Progress Bar
+        progress_bar = pn.widgets.Progress(
+            value=self.vm.param.progress_value,
+            active=self.vm.param.progress_active,
+            bar_color="primary"
+        )
 
         # Periodic Callback for logs
         log_area = pn.widgets.TextAreaInput.from_param(self.vm.param.logs, height=300, disabled=True)
@@ -202,6 +272,7 @@ class ConfigTab:
                 pn.Param(self.vm.param.temperature),
                 pn.Param(self.vm.param.steps),
                 run_btn,
+                progress_bar,
                 pn.Param(self.vm.param.status_message, widgets={'status_message': pn.widgets.StaticText}),
             ),
             pn.Column(

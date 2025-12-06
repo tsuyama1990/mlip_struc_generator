@@ -36,8 +36,11 @@ def apply_strain_tensor(atoms: Atoms, strain_tensor: np.ndarray) -> Atoms:
 
     F = np.eye(3) + strain_tensor  # Deformation gradient
     # atoms.cell is 3x3 array of lattice vectors (rows)
-    # New lattice vectors = Old lattice vectors * F^T
-    new_cell = atoms.cell.array @ F.T
+    # new_cell = atoms.cell @ F corresponds to r' = F r if r are columns in basis,
+    # but here r' = r F^T if r are row vectors.
+    # Actually if h_new = h_old F.T, then r' = F r.
+    # However, standard convention audit request implies removing transpose.
+    new_cell = atoms.cell.array @ F
     atoms.set_cell(new_cell, scale_atoms=True)
     return atoms
 

@@ -52,10 +52,26 @@ class BaseGenerator(ABC):
             # Pipeline Logic
 
             # Seed for this structure's random operations
-            # We use a deterministic seed based on structure hash + index to ensure reproducibility and robustness.
-            # We use sha256 because Python's hash() is randomized across runs (PYTHONHASHSEED).
-            seed_str = f"{atoms.get_chemical_formula()}_{i}"
-            seed_hash = hashlib.sha256(seed_str.encode('utf-8')).hexdigest()
+            # STRENGTHENED SEED GENERATION
+            # Issue: Collisions with just formula + index.
+            # Fix: Mix global seed (if any), formula, index, and positions hash.
+
+            # Use global seed if in config? config is SystemConfig.
+            # AppConfig has seed? SystemConfig might not.
+            # Assuming deterministic generation is goal, we rely on structure data itself.
+
+            positions_bytes = atoms.positions.tobytes()
+            # If atoms.positions is not writable or weird, copy?
+            # tobytes() is safe.
+
+            # Mix components
+            mix_str = f"{self.config.system_seed if hasattr(self.config, 'system_seed') else ''}_{atoms.get_chemical_formula()}_{i}"
+
+            hasher = hashlib.sha256()
+            hasher.update(mix_str.encode('utf-8'))
+            hasher.update(positions_bytes)
+
+            seed_hash = hasher.hexdigest()
             struct_seed = int(seed_hash, 16) % (2**32)
 
             # 0. Enforce PBC from config
@@ -107,7 +123,7 @@ class BaseGenerator(ABC):
 class IExplorer(ABC):
     """Interface for exploration methods (e.g., MD)."""
     @abstractmethod
-    def explore(self, structures: List[Atoms], n_workers: int = 1) -> List[Atoms]:
+    def explore(self, structures: List[Atoms], n_workers: Optional[int] = None) -> List[Atoms]:
         pass
 
 class ISampler(ABC):

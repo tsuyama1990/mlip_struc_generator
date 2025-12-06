@@ -3,17 +3,42 @@ import numpy as np
 from typing import List, Optional, Dict
 from ase import Atoms
 from ase.build import bulk
-from ase.data import covalent_radii, atomic_numbers
+from ase.data import covalent_radii, atomic_numbers, chemical_symbols
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import IonicSystemConfig
 from nnp_gen.core.exceptions import GenerationError
 
 logger = logging.getLogger(__name__)
 
+def validate_element(el: str) -> str:
+    """
+    Validates and sanitizes an element symbol.
+    """
+    if not isinstance(el, str):
+         raise ValueError(f"Element must be a string, got {type(el)}")
+    el_clean = el.strip().capitalize()
+    if el_clean not in chemical_symbols:
+        # chemical_symbols contains 'X' as a dummy sometimes, but usually proper elements.
+        # atomic_numbers is a safer check if we want real elements.
+        # But prompt asked for chemical_symbols.
+        raise ValueError(f"Invalid element symbol: {el}")
+    return el_clean
+
 class IonicGenerator(BaseGenerator):
     def __init__(self, config: IonicSystemConfig):
         super().__init__(config)
         self.config = config
+
+        # Validate elements
+        clean_elements = []
+        for el in self.config.elements:
+             try:
+                 clean_elements.append(validate_element(el))
+             except ValueError as e:
+                 logger.error(str(e))
+                 raise GenerationError(str(e))
+        # Update config with sanitized elements (assuming mutable)
+        self.config.elements = clean_elements
 
         # Check for optional dependencies
         try:

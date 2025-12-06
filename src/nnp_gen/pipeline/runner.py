@@ -1,7 +1,9 @@
 import logging
 import os
+import pickle
 from typing import List, Optional
 from ase import Atoms
+from ase.io import read, write
 
 from nnp_gen.core.config import AppConfig
 from nnp_gen.core.models import StructureMetadata
@@ -11,8 +13,40 @@ from nnp_gen.explorers.md_engine import MDExplorer
 from nnp_gen.samplers.selector import FPSSampler, RandomSampler, DescriptorManager
 from nnp_gen.core.storage import DatabaseManager
 from nnp_gen.core.io import ASEExporter
+from nnp_gen.core.exceptions import PipelineError, GenerationError, ExplorationError
 
 logger = logging.getLogger(__name__)
+
+class CheckpointManager:
+    def __init__(self, checkpoint_dir: str):
+        self.checkpoint_dir = checkpoint_dir
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+    def save(self, name: str, data: List[Atoms]):
+        path = os.path.join(self.checkpoint_dir, f"{name}.traj")
+        # ASE trajectory or pickle?
+        # Atoms objects are pickleable.
+        # But ase.io.write is better for portability/inspection.
+        try:
+            write(path, data)
+            logger.info(f"Checkpoint saved: {path}")
+        except Exception as e:
+            logger.error(f"Failed to save checkpoint {name}: {e}")
+
+    def load(self, name: str) -> Optional[List[Atoms]]:
+        path = os.path.join(self.checkpoint_dir, f"{name}.traj")
+        if os.path.exists(path):
+            try:
+                data = read(path, index=':')
+                logger.info(f"Checkpoint loaded: {path}")
+                return data
+            except Exception as e:
+                logger.warning(f"Failed to load checkpoint {name}: {e}")
+                return None
+        return None
+
+    def exists(self, name: str) -> bool:
+        return os.path.exists(os.path.join(self.checkpoint_dir, f"{name}.traj"))
 
 class PipelineRunner:
     def __init__(
@@ -26,6 +60,12 @@ class PipelineRunner:
     ):
         self.config = config
         os.makedirs(self.config.output_dir, exist_ok=True)
+
+        # Setup Checkpoint Manager
+        # Use job_id if available or hash of config?
+        # JobManager usually sets separate output_dir per job.
+        # We can store checkpoints in output_dir/checkpoints
+        self.ckpt_mgr = CheckpointManager(os.path.join(self.config.output_dir, "checkpoints"))
 
         # Dependency Injection with Defaults
         self.generator = generator or GeneratorFactory.get_generator(self.config.system)
@@ -64,17 +104,20 @@ class PipelineRunner:
 
         # 1. Initialization / Generation
         logger.info("Step 1: Structure Generation")
-        try:
-            initial_structures = self.generator.generate()
-            logger.info(f"Generated {len(initial_structures)} initial structures.")
 
-            # Checkpoint
-            if initial_structures:
-                self.exporter.export(initial_structures, os.path.join(self.config.output_dir, "initial_structures.xyz"))
+        initial_structures = self.ckpt_mgr.load("step1_generation")
+        if not initial_structures:
+            try:
+                initial_structures = self.generator.generate()
+                logger.info(f"Generated {len(initial_structures)} initial structures.")
 
-        except Exception as e:
-            logger.error(f"Generation failed: {e}")
-            return
+                if initial_structures:
+                    self.ckpt_mgr.save("step1_generation", initial_structures)
+                    # Also export for user
+                    self.exporter.export(initial_structures, os.path.join(self.config.output_dir, "initial_structures.xyz"))
+            except Exception as e:
+                logger.error(f"Generation failed: {e}")
+                raise GenerationError(str(e))
 
         if not initial_structures:
             logger.error("No structures generated. Aborting.")
@@ -82,35 +125,51 @@ class PipelineRunner:
 
         # 2. Exploration (MD)
         logger.info("Step 2: Exploration")
-        if self.explorer:
-            n_workers = max(1, os.cpu_count() // 2 if os.cpu_count() else 1)
-            explored_structures = self.explorer.explore(initial_structures, n_workers=n_workers)
-        else:
-             logger.warning(f"Exploration method {self.config.exploration.method} not implemented/supported or disabled. Using initial structures.")
-             explored_structures = initial_structures
 
-        # If exploration returns empty (e.g. all exploded), we might fallback or abort
+        explored_structures = self.ckpt_mgr.load("step2_exploration")
         if not explored_structures:
-            logger.warning("No valid structures from exploration. Using initial structures if any.")
-            explored_structures = initial_structures
+            if self.explorer:
+                # Use psutil-based dynamic workers inside MDExplorer (handled by default)
+                # Or pass explicitly if needed.
+                try:
+                    explored_structures = self.explorer.explore(initial_structures)
+                except Exception as e:
+                    logger.error(f"Exploration failed: {e}")
+                    raise ExplorationError(str(e))
+            else:
+                 logger.warning(f"Exploration method {self.config.exploration.method} not implemented/supported or disabled. Using initial structures.")
+                 explored_structures = initial_structures
 
-        # Checkpoint
-        self.exporter.export(explored_structures, os.path.join(self.config.output_dir, "explored_structures.xyz"))
+            # If exploration returns empty (e.g. all exploded), we might fallback or abort
+            if not explored_structures:
+                logger.warning("No valid structures from exploration. Using initial structures if any.")
+                explored_structures = initial_structures
+
+            if explored_structures:
+                self.ckpt_mgr.save("step2_exploration", explored_structures)
+                self.exporter.export(explored_structures, os.path.join(self.config.output_dir, "explored_structures.xyz"))
 
         logger.info(f"Total structures after exploration: {len(explored_structures)}")
 
         # 3. Sampling
         logger.info("Step 3: Sampling")
-        sampling_config = self.config.sampling
-        n_samples = sampling_config.n_samples
 
-        sampled_structures = []
-        if explored_structures:
-            if self.sampler:
-                sampled_structures = self.sampler.sample(explored_structures, n_samples)
-            else:
-                logger.info("Manual sampling or unknown strategy, keeping all.")
-                sampled_structures = explored_structures
+        sampled_structures = self.ckpt_mgr.load("step3_sampling")
+        sampling_config = self.config.sampling
+
+        if not sampled_structures:
+            n_samples = sampling_config.n_samples
+
+            sampled_structures = []
+            if explored_structures:
+                if self.sampler:
+                    sampled_structures = self.sampler.sample(explored_structures, n_samples)
+                else:
+                    logger.info("Manual sampling or unknown strategy, keeping all.")
+                    sampled_structures = explored_structures
+
+            if sampled_structures:
+                self.ckpt_mgr.save("step3_sampling", sampled_structures)
 
         logger.info(f"Selected {len(sampled_structures)} structures.")
 
@@ -142,5 +201,7 @@ class PipelineRunner:
 
         except Exception as e:
             logger.error(f"Database save failed: {e}")
+            # Raise generic PipelineError?
+            raise PipelineError(f"Database save failed: {e}")
 
         logger.info("Pipeline Complete.")
