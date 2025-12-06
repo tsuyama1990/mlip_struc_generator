@@ -1,4 +1,0 @@
-usage: panel [-h] [-v]
-             {build,info,init,json,secret,settings,static,bundle,compile,convert,oauth-secret,serve}
-             ...
-panel: error: unrecognized arguments: False

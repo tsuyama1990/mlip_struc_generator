@@ -1,6 +1,8 @@
 import logging
+import numpy as np
 from typing import List
 from ase import Atoms
+from ase.build import bulk
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import AlloySystemConfig
 
@@ -13,18 +15,45 @@ class AlloyGenerator(BaseGenerator):
 
     def _generate_impl(self) -> List[Atoms]:
         """
-        Generates alloy structures using SQS (via icet) or random substitution.
+        Generates alloy structures using random substitution.
         """
         logger.info(f"Generating alloy structures for {self.config.elements}")
         structures = []
 
-        # Strict import - no fallback
-        from icet import ClusterSpace
-        from icet.tools import StructureEnumerator
+        # Determine lattice constant and structure
+        a = self.config.lattice_constant if self.config.lattice_constant else 3.8
+        sg = self.config.spacegroup
 
-        logger.info("Using icet for SQS generation")
+        try:
+            if sg == 229: # BCC
+                prim = bulk('Fe', 'bcc', a=a)
+            elif sg == 225 or sg is None: # FCC default
+                # Use first element as dummy species
+                prim = bulk('Cu', 'fcc', a=a)
+            else:
+                # Basic support for now
+                logger.warning(f"Unsupported spacegroup {sg}, defaulting to FCC")
+                prim = bulk('Cu', 'fcc', a=a)
+        except Exception as e:
+            logger.error(f"Failed to build primitive cell: {e}")
+            return []
 
-        dummy = Atoms('Cu4', positions=[[0,0,0], [0,1,0], [1,0,0], [1,1,0]], cell=[2,2,2])
-        structures.append(dummy)
+        # Create supercell
+        size = self.config.supercell_size
+        atoms = prim * size
+
+        # Random substitution
+        # We assign elements randomly.
+        # For better physics, we could use SQS if icet is installed,
+        # but random solution is a valid baseline.
+
+        n_atoms = len(atoms)
+        elements = self.config.elements
+
+        rng = np.random.RandomState(42)
+        symbols = rng.choice(elements, size=n_atoms)
+        atoms.set_chemical_symbols(symbols)
+
+        structures.append(atoms)
 
         return structures
