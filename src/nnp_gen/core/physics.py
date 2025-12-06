@@ -151,7 +151,6 @@ def ensure_supercell_size(atoms: Atoms, r_cut: float, factor: float = 1.0) -> At
         current_vol = np.abs(np.linalg.det(current_cell))
 
         # Recalculate widths
-        widths = []
         # Width 0: distance between faces spanned by v1, v2.
         # w0 = Vol / |v1 x v2|
         # etc.
@@ -168,7 +167,18 @@ def ensure_supercell_size(atoms: Atoms, r_cut: float, factor: float = 1.0) -> At
         converged = True
         for i in range(3):
             if atoms.pbc[i]:
-                w = current_vol / areas[i] if areas[i] > 1e-6 else 0
+                if areas[i] > 1e-6:
+                    w = current_vol / areas[i]
+                else:
+                    w = 0.0
+
+                # Protection against division by zero if w is very small
+                if w < 1e-9:
+                     # Degenerate cell or very flat. Cannot expand properly based on volume.
+                     # Just assume it's bad and maybe try to expand but scale would be infinite.
+                     # We skip expansion update to avoid crash/inf.
+                     continue
+
                 if w < l_min - 1e-4: # epsilon tolerance
                     # We need to increase repeat[i]
                     # Scaling factor needed: l_min / w

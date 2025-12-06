@@ -135,10 +135,12 @@ class IonicGenerator(BaseGenerator):
                     a = 2.0 * radii_sum
                     struct = self.pmg.Structure.from_spacegroup("Fm-3m", Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.5,0.5,0.5]])
                 elif t == "cscl":
-                    a = 2.3 * radii_sum
+                    # CsCl (B2): 8-coord. d = a * sqrt(3)/2 => a = 2/sqrt(3) * d ~ 1.15 * d
+                    a = (2.0 / np.sqrt(3.0)) * radii_sum
                     struct = self.pmg.Structure.from_spacegroup("Pm-3m", Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.5,0.5,0.5]])
                 elif t == "zincblende":
-                    a = 2.3 * radii_sum * (4.0/np.sqrt(3.0)) # approx based on bond length
+                    # Zincblende (B3): 4-coord. d = a * sqrt(3)/4 => a = 4/sqrt(3) * d ~ 2.31 * d
+                    a = (4.0 / np.sqrt(3.0)) * radii_sum
                     struct = self.pmg.Structure.from_spacegroup("F-43m", Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.25,0.25,0.25]])
                 elif t == "fluorite":
                     # CaF2: Ca at 0,0,0; F at 0.25,0.25,0.25 and 0.75,0.75,0.75
