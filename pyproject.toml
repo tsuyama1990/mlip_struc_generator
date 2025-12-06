@@ -33,3 +33,9 @@ dev = [
     "pytest",
     "pytest-mock"
 ]
+gui = [
+    "panel",
+    "plotly",
+    "pyyaml",
+    "pydantic"
+]
