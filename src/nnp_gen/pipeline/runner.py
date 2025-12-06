@@ -1,7 +1,7 @@
 import logging
 import os
 import pickle
-from typing import List, Optional
+from typing import List, Optional, Any
 from ase import Atoms
 from ase.io import read, write
 
@@ -22,22 +22,28 @@ class CheckpointManager:
         self.checkpoint_dir = checkpoint_dir
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-    def save(self, name: str, data: List[Atoms]):
-        path = os.path.join(self.checkpoint_dir, f"{name}.traj")
-        # ASE trajectory or pickle?
-        # Atoms objects are pickleable.
-        # But ase.io.write is better for portability/inspection.
+    def save(self, name: str, data: Any):
+        """
+        Save data to a pickle file.
+        Using .pkl extension as requested for full state preservation.
+        """
+        path = os.path.join(self.checkpoint_dir, f"{name}.pkl")
         try:
-            write(path, data)
+            with open(path, 'wb') as f:
+                pickle.dump(data, f)
             logger.info(f"Checkpoint saved: {path}")
         except Exception as e:
             logger.error(f"Failed to save checkpoint {name}: {e}")
 
-    def load(self, name: str) -> Optional[List[Atoms]]:
-        path = os.path.join(self.checkpoint_dir, f"{name}.traj")
+    def load(self, name: str) -> Optional[Any]:
+        """
+        Load data from a pickle file.
+        """
+        path = os.path.join(self.checkpoint_dir, f"{name}.pkl")
         if os.path.exists(path):
             try:
-                data = read(path, index=':')
+                with open(path, 'rb') as f:
+                    data = pickle.load(f)
                 logger.info(f"Checkpoint loaded: {path}")
                 return data
             except Exception as e:
@@ -46,7 +52,7 @@ class CheckpointManager:
         return None
 
     def exists(self, name: str) -> bool:
-        return os.path.exists(os.path.join(self.checkpoint_dir, f"{name}.traj"))
+        return os.path.exists(os.path.join(self.checkpoint_dir, f"{name}.pkl"))
 
 class PipelineRunner:
     def __init__(
@@ -62,9 +68,6 @@ class PipelineRunner:
         os.makedirs(self.config.output_dir, exist_ok=True)
 
         # Setup Checkpoint Manager
-        # Use job_id if available or hash of config?
-        # JobManager usually sets separate output_dir per job.
-        # We can store checkpoints in output_dir/checkpoints
         self.ckpt_mgr = CheckpointManager(os.path.join(self.config.output_dir, "checkpoints"))
 
         # Dependency Injection with Defaults
@@ -105,14 +108,15 @@ class PipelineRunner:
         # 1. Initialization / Generation
         logger.info("Step 1: Structure Generation")
 
-        initial_structures = self.ckpt_mgr.load("step1_generation")
+        # Checkpoint name: checkpoint_generated
+        initial_structures = self.ckpt_mgr.load("checkpoint_generated")
         if not initial_structures:
             try:
                 initial_structures = self.generator.generate()
                 logger.info(f"Generated {len(initial_structures)} initial structures.")
 
                 if initial_structures:
-                    self.ckpt_mgr.save("step1_generation", initial_structures)
+                    self.ckpt_mgr.save("checkpoint_generated", initial_structures)
                     # Also export for user
                     self.exporter.export(initial_structures, os.path.join(self.config.output_dir, "initial_structures.xyz"))
             except Exception as e:
@@ -126,7 +130,8 @@ class PipelineRunner:
         # 2. Exploration (MD)
         logger.info("Step 2: Exploration")
 
-        explored_structures = self.ckpt_mgr.load("step2_exploration")
+        # Checkpoint name: checkpoint_explored
+        explored_structures = self.ckpt_mgr.load("checkpoint_explored")
         if not explored_structures:
             if self.explorer:
                 # Use psutil-based dynamic workers inside MDExplorer (handled by default)
@@ -146,7 +151,7 @@ class PipelineRunner:
                 explored_structures = initial_structures
 
             if explored_structures:
-                self.ckpt_mgr.save("step2_exploration", explored_structures)
+                self.ckpt_mgr.save("checkpoint_explored", explored_structures)
                 self.exporter.export(explored_structures, os.path.join(self.config.output_dir, "explored_structures.xyz"))
 
         logger.info(f"Total structures after exploration: {len(explored_structures)}")
@@ -154,7 +159,10 @@ class PipelineRunner:
         # 3. Sampling
         logger.info("Step 3: Sampling")
 
-        sampled_structures = self.ckpt_mgr.load("step3_sampling")
+        # Checkpoint name: checkpoint_sampled
+        # Note: Previous plan used "step3_sampling", changing to "checkpoint_sampled" for consistency with user request (checkpoint_*.pkl)
+        # However user specifically asked for checkpoint_generated and checkpoint_explored. I will use checkpoint_sampled for step 3.
+        sampled_structures = self.ckpt_mgr.load("checkpoint_sampled")
         sampling_config = self.config.sampling
 
         if not sampled_structures:
@@ -169,7 +177,7 @@ class PipelineRunner:
                     sampled_structures = explored_structures
 
             if sampled_structures:
-                self.ckpt_mgr.save("step3_sampling", sampled_structures)
+                self.ckpt_mgr.save("checkpoint_sampled", sampled_structures)
 
         logger.info(f"Selected {len(sampled_structures)} structures.")
 
