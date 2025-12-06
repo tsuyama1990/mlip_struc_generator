@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Dict
 from ase import Atoms
 from ase.build import bulk
 from ase.data import covalent_radii, atomic_numbers
@@ -19,16 +19,18 @@ class IonicGenerator(BaseGenerator):
         try:
             import pymatgen.core as pmg
             from pymatgen.symmetry.structure import SymmetrizedStructure
-            from pymatgen.core import Lattice, Species
+            from pymatgen.core import Lattice, Species, Element
             self.pmg = pmg
             self.Species = Species
             self.Lattice = Lattice
+            self.Element = Element
             self.has_pmg = True
         except ImportError:
             self.has_pmg = False
             self.pmg = None
             self.Lattice = None
             self.Species = None
+            self.Element = None
             logger.warning("pymatgen not installed. IonicGenerator functionality will be severely limited.")
 
     def _generate_impl(self) -> List[Atoms]:
@@ -56,45 +58,50 @@ class IonicGenerator(BaseGenerator):
 
         return structures
 
-    def _get_radius(self, species_str: str, charge: Optional[int] = None) -> float:
+    def _get_heuristic_radius(self, species_str: str, charge: Optional[int] = None) -> float:
         """
-        Get the radius of a species for lattice constant estimation.
-        Prioritizes Shannon effective ionic radii if charge is provided/guessable,
-        falls back to atomic radius.
+        Get the radius of a species for lattice constant estimation using a tiered heuristic.
+
+        Tier 1: Shannon effective ionic radii (via pymatgen).
+        Tier 2: Electronegativity-scaled fallback (TODO: refined scaling), currently standard atomic/ionic.
+        Tier 3: Geometric considerations are handled in _create_binary_prototypes.
         """
         if not self.has_pmg:
-             # ASE fallback
+             # Tier 2 Fallback (No pymatgen): ASE covalent radii
+             # Simple heuristic: for ions, covalent radii are often too large for cations
+             # and too small for anions, but we lack data to correct it properly without a table.
              return covalent_radii[atomic_numbers[species_str]]
 
-        try:
-            # 1. Try Shannon radius if charge is known
-            if charge is not None:
-                try:
-                    # Use Species class to get Shannon radius
-                    sp = self.Species(species_str, oxidation_state=charge)
-                    # Use coord number 6 ("VI") as a standard for rocksalt/general estimation
-                    return sp.get_shannon_radius(cn="VI")
-                except Exception:
-                    pass
+        # Tier 1: Oxidation State Inference / Shannon Radii
+        if charge is not None:
+            try:
+                # Use Species class to get Shannon radius
+                # Using coordination number 6 ("VI") as a standard reference for rocksalt
+                sp = self.Species(species_str, oxidation_state=charge)
+                radius = sp.get_shannon_radius(cn="VI")
+                if radius:
+                    return radius
+            except Exception:
+                pass # Fall through to next tier
 
-            el = self.pmg.Element(species_str)
+        el = self.Element(species_str)
 
-            # 2. Try average ionic radius if no charge provided or lookup failed
-            if el.average_ionic_radius:
-                return el.average_ionic_radius
+        # Tier 2: Fallbacks
 
-            # 3. Fallback: Use atomic radius
-            # Note: atomic_radius might be None for some elements
-            r = el.atomic_radius
-            if r is not None:
-                return r
+        # 2a. Average ionic radius (if available in pymatgen data)
+        if el.average_ionic_radius:
+            return el.average_ionic_radius
 
-            # 4. Ultimate fallback (e.g. for noble gases if atomic_radius is missing)
-            return 1.5
+        # 2b. Atomic radius (often covalent)
+        r_atomic = el.atomic_radius
+        if r_atomic:
+            # Electronegativity correction could go here if we had a target structure context
+            # For now, we warn if we are deep in fallback territory for an ionic generator
+            logger.debug(f"Using atomic radius for {species_str} (fallback)")
+            return r_atomic
 
-        except Exception as e:
-            logger.warning(f"Could not retrieve radius for {species_str}: {e}")
-            return 1.5
+        # 2c. Ultimate fallback
+        return 1.5
 
     def _generate_with_pymatgen(self) -> List[Atoms]:
         """
@@ -105,11 +112,10 @@ class IonicGenerator(BaseGenerator):
         oxidation_states = self.config.oxidation_states
 
         # Get radii to estimate lattice constant
-        # We compute radii based on individual oxidation states
         radii_map = {}
         for el_str in elements:
             charge = oxidation_states.get(el_str)
-            radii_map[el_str] = self._get_radius(el_str, charge)
+            radii_map[el_str] = self._get_heuristic_radius(el_str, charge)
 
         logger.info(f"Using radii for generation: {radii_map}")
 
@@ -137,38 +143,52 @@ class IonicGenerator(BaseGenerator):
     def _create_binary_prototypes(self, species_a: str, species_b: str, radii_sum: float, types: List[str]) -> List[Atoms]:
         structures = []
 
-        # Heuristics for lattice constants based on radii sum
+        # Tier 3: Geometric Debug / Correct Pre-factors
+        # Ensure correct a = f(r) math
 
         for t in types:
             try:
                 struct = None
                 if t == "rocksalt":
-                    # For Rocksalt (face-centered cubic)
-                    # a = 2 * radii_sum
+                    # For Rocksalt (face-centered cubic, Fm-3m)
+                    # Nearest neighbor distance d = r_A + r_B = radii_sum
+                    # Lattice constant a = 2 * d
                     a = 2.0 * radii_sum
                     struct = self.pmg.Structure.from_spacegroup("Fm-3m", self.Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.5,0.5,0.5]])
 
                 elif t == "cscl":
-                    # CsCl (Body centered cubic-like).
-                    # a = 2/sqrt(3) * radii_sum
+                    # CsCl (Simple Cubic based, Pm-3m)
+                    # Nearest neighbor (body diagonal) d = sqrt(3)/2 * a
+                    # => a = 2/sqrt(3) * d
                     a = (2.0 / np.sqrt(3.0)) * radii_sum
                     struct = self.pmg.Structure.from_spacegroup("Pm-3m", self.Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.5,0.5,0.5]])
 
                 elif t == "zincblende":
-                    # Zincblende (Diamond-like)
-                    # a = 4/sqrt(3) * radii_sum
+                    # Zincblende (F-43m)
+                    # Nearest neighbor (quarter body diagonal) d = sqrt(3)/4 * a
+                    # => a = 4/sqrt(3) * d
                     a = (4.0 / np.sqrt(3.0)) * radii_sum
                     struct = self.pmg.Structure.from_spacegroup("F-43m", self.Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.25,0.25,0.25]])
 
                 elif t == "fluorite":
-                    # Fluorite CaF2.
-                    # a = 4/sqrt(3) * radii_sum
+                    # Fluorite CaF2 (Fm-3m)
+                    # Nearest neighbor distance d (Ca-F) is sqrt(3)/4 * a
+                    # => a = 4/sqrt(3) * d
                     a = (4.0 / np.sqrt(3.0)) * radii_sum
                     struct = self.pmg.Structure.from_spacegroup("Fm-3m", self.Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.25,0.25,0.25]])
 
                 if struct:
                     atoms = self._pmg_to_ase(struct)
-                    # Expand supercell
+
+                    # Note on Supercells:
+                    # We generate the unit cell above with physically correct 'a'.
+                    # However, MLIP training often requires a minimum simulation box size (r_cut).
+                    # The BaseGenerator pipeline will apply `ensure_supercell_size` later,
+                    # which may expand this unit cell. This is intended behavior.
+
+                    # We also apply explicit supercell expansion from config here if requested,
+                    # though arguably this should also be handled by the pipeline or configured carefully.
+                    # Current logic: apply config-based expansion.
                     atoms = atoms * self.config.supercell_size
                     structures.append(atoms)
             except Exception as e:
@@ -219,7 +239,6 @@ class IonicGenerator(BaseGenerator):
                 structures.append(atoms)
             except Exception as e:
                  logger.error(f"Fallback generation failed: {e}")
-                 # Raise GenerationError to be consistent with requirements
                  raise GenerationError(f"Fallback generation failed for {elements}: {e}")
 
         return structures
