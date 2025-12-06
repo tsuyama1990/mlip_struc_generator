@@ -125,13 +125,17 @@ class JobManager:
                     runner = PipelineRunner(config)
                     runner.run()
 
-                    job.status = JobStatus.COMPLETED
-                    job.end_time = datetime.now()
+                    with self._jobs_lock:
+                        job.status = JobStatus.COMPLETED
+                        job.end_time = datetime.now()
+
                     job_logger.info(f"Job {job_id} Completed Successfully")
                 except Exception as inner_e:
-                    job.status = JobStatus.FAILED
-                    job.end_time = datetime.now()
-                    job.error_message = str(inner_e)
+                    with self._jobs_lock:
+                        job.status = JobStatus.FAILED
+                        job.end_time = datetime.now()
+                        job.error_message = str(inner_e)
+
                     logging.getLogger("nnp_gen").error(f"Job Execution Failed: {inner_e}", exc_info=True)
                     raise inner_e
 
