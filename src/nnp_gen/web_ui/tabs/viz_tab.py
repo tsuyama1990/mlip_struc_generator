@@ -4,6 +4,8 @@ import param
 import panel as pn
 import numpy as np
 import threading
+import concurrent.futures
+import tempfile
 from typing import List, Optional
 from ase import Atoms
 from ase.io import write
@@ -19,10 +21,6 @@ from nnp_gen.samplers.selector import DescriptorManager
 class VizViewModel(param.Parameterized):
     # Job Selection
     job_selector = param.Selector(objects=[], doc="Select Completed Job")
-    # FileSelector 'glob' is deprecated or not supported in this version of param?
-    # Actually, FileSelector takes 'path' and keyword args.
-    # But usually we use pn.widgets.FileInput for web apps anyway.
-    # We will just keep a dummy param for path string.
     external_db_path = param.String(default="", doc="External DB Path")
 
     # Data State
@@ -35,12 +33,17 @@ class VizViewModel(param.Parameterized):
     viewer_html = param.String(default="")
 
     status_msg = param.String(default="")
+    warning_msg = param.String(default="") # For truncation warnings
 
     def __init__(self, **params):
         super().__init__(**params)
         self.job_manager = JobManager()
-        self._cache_pca = {} # Cache PCA results per db_path
+        self._cache_pca = {}
         self.current_db_path = None
+
+        # Dedicated executor for UI tasks to avoid blocking main loop
+        # and to avoid blocking the JobManager's single worker
+        self.ui_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
         # Init plots
         self._init_plot()
@@ -56,9 +59,6 @@ class VizViewModel(param.Parameterized):
         tap = TapTool(renderers=[renderer])
         p.add_tools(tap)
         p.add_tools(HoverTool(tooltips=[("ID", "@idx")]))
-
-        # Callback handling is tricky in pure ViewModel,
-        # usually done in the View layer (VizTab) binding to source.selected.indices
 
         self.pca_plot = p
 
@@ -93,22 +93,19 @@ class VizViewModel(param.Parameterized):
 
         self.current_db_path = db_path
         self.status_msg = f"Loading {db_path}..."
+        self.warning_msg = ""
 
         try:
-            # Connect read-only
-            # ase.db.connect doesn't have explicit read_only flag for sqlite,
-            # but we just won't write.
-            # However, to be safe against locks, we can ensure we close quickly.
-
             structs = []
             metas = []
-
-            # Use threading or ensure fast read
-            # For large DBs, this might block. Ideally should be async or paged.
-            # Limiting to 5000 for now as per plan advice.
             LIMIT = 5000
 
             with ase.db.connect(db_path) as db:
+                count = db.count()
+                if count > LIMIT:
+                    self.warning_msg = f"Warning: Dataset has {count} structures. Displaying first {LIMIT} only."
+
+                # Fetch limited rows
                 rows = list(db.select(limit=LIMIT))
                 for row in rows:
                     atoms = row.toatoms()
@@ -125,8 +122,8 @@ class VizViewModel(param.Parameterized):
             self.metadata_list = metas
             self.status_msg = f"Loaded {len(structs)} structures."
 
-            # Update PCA
-            self.compute_pca()
+            # Update PCA asynchronously
+            self.compute_pca_async()
 
             # Select first
             if structs:
@@ -136,27 +133,25 @@ class VizViewModel(param.Parameterized):
         except Exception as e:
             self.status_msg = f"Error loading DB: {e}"
 
-    def compute_pca(self):
+    def compute_pca_async(self):
+        """
+        Offload PCA computation to thread pool.
+        """
         if not self.structures:
             return
 
-        # Check if descriptors exist
+        self.status_msg = "Calculating PCA in background..."
+
+        # Prepare data in main thread
         descriptors = []
         valid_indices = []
 
         for i, atoms in enumerate(self.structures):
             desc = atoms.info.get("descriptor")
             if desc is not None and len(desc) > 0:
-                # Descriptor might be array of arrays (local) or one array (global)
-                # FPS Sampler in core uses global average or similar?
-                # Let's check DescriptorManager.
-                # It returns array of shape (n_atoms, n_features) for SOAP usually?
-                # core/samplers/selector.py: _calculate_soap returns create(..., average="inner") which is (1, n_features).
-                # _calculate_rdf returns (1, bins).
-                # So we expect (n_features,) or (1, n_features).
                 d = np.array(desc)
                 if d.ndim == 2:
-                    d = d.mean(axis=0) # Simple average if multiple rows
+                    d = d.mean(axis=0)
                 descriptors.append(d)
                 valid_indices.append(i)
 
@@ -165,28 +160,53 @@ class VizViewModel(param.Parameterized):
             return
 
         X = np.array(descriptors)
-        # Handle NaNs
         X = np.nan_to_num(X)
 
+        # Submit to executor
+        future = self.ui_executor.submit(self._run_pca, X, valid_indices)
+        future.add_done_callback(self._on_pca_complete)
+
+    def _run_pca(self, X, valid_indices):
+        """Runs in worker thread."""
+        pca = PCA(n_components=2)
+        coords = pca.fit_transform(X)
+        return coords, valid_indices
+
+    def _on_pca_complete(self, future):
+        """Callback when PCA is done."""
         try:
-            pca = PCA(n_components=2)
-            coords = pca.fit_transform(X)
+            coords, valid_indices = future.result()
 
-            # Prepare data for Bokeh
-            colors = []
-            for i in valid_indices:
-                meta = self.metadata_list[i]
-                colors.append("red" if meta["is_sampled"] else "blue")
-
-            self.pca_source.data = dict(
-                x=coords[:, 0],
-                y=coords[:, 1],
-                color=colors,
-                idx=valid_indices
-            )
+            # Schedule UI update on main thread/loop
+            if pn.state.curdoc:
+                pn.state.execute(lambda: self._update_pca_plot(coords, valid_indices))
+            else:
+                # Fallback if no server context (e.g. testing)
+                self._update_pca_plot(coords, valid_indices)
 
         except Exception as e:
-            self.status_msg = f"PCA Error: {e}"
+            # Schedule error update
+             if pn.state.curdoc:
+                pn.state.execute(lambda: setattr(self, 'status_msg', f"PCA Failed: {e}"))
+
+    def _update_pca_plot(self, coords, valid_indices):
+        """Update Bokeh source. Must run on main thread/with doc lock."""
+        colors = []
+        for i in valid_indices:
+            # Check bounds just in case metadata list changed (unlikely given flow)
+            if i < len(self.metadata_list):
+                meta = self.metadata_list[i]
+                colors.append("red" if meta["is_sampled"] else "blue")
+            else:
+                colors.append("gray")
+
+        self.pca_source.data = dict(
+            x=coords[:, 0],
+            y=coords[:, 1],
+            color=colors,
+            idx=valid_indices
+        )
+        self.status_msg = "PCA Updated."
 
     @param.depends("selected_idx", watch=True)
     def update_viewer(self):
@@ -208,47 +228,46 @@ class VizTab:
         self.vm = VizViewModel()
 
         # Watcher for PCA selection
-        # When user taps a point in Bokeh, update selected_idx
         def on_selection_change(attr, old, new):
             if new:
-                # new is list of indices in the source
-                # source index matches valid_indices index in compute_pca?
-                # Yes, because we rebuilt source.data.
-                # Wait, source.data['idx'] holds the real index in self.structures.
                 selected_row_idx = new[0]
                 real_idx = self.vm.pca_source.data['idx'][selected_row_idx]
                 self.vm.selected_idx = real_idx
 
         self.vm.pca_source.selected.on_change("indices", on_selection_change)
 
-        # Periodic refresh for jobs
-        # Check if we are in a running loop or defer this
         try:
             pn.state.add_periodic_callback(self.vm.update_job_list, period=2000)
         except RuntimeError:
-             # If building app offline/test, this might fail or warn.
-             # We should probably attach it in 'onload' or similar if possible.
-             # Or just ignore during static build.
              pass
 
     def view(self):
         # File Input for external load
         file_input = pn.widgets.FileInput(accept=".db")
+
         def on_upload(event):
             if file_input.value:
-                # Save to temp file to read?
-                # Or param.FileSelector handles path?
-                # FileInput gives bytes. ase.db needs path.
-                # We need to save it.
-                import tempfile
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
-                    tmp.write(file_input.value)
-                    tmp_path = tmp.name
-                self.vm.load_db(tmp_path)
+                tmp_path = None
+                try:
+                    # Create temp file, write content, close it, but keep it on disk
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+                        tmp.write(file_input.value)
+                        tmp_path = tmp.name
+
+                    # Load from the temp path
+                    self.vm.load_db(tmp_path)
+                finally:
+                    # Ensure cleanup happens even if load_db fails
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.remove(tmp_path)
+                        except OSError as e:
+                            print(f"Error removing temp file: {e}")
+
         file_input.param.watch(on_upload, "value")
 
         return pn.Column(
-            get_3dmol_header(), # Inject script tag
+            get_3dmol_header(),
             pn.Row(
                 pn.Column(
                     "### Data Source",
@@ -256,6 +275,7 @@ class VizTab:
                     "Or Load External DB:",
                     file_input,
                     pn.Param(self.vm.param.status_msg, widgets={'status_msg': pn.widgets.StaticText}),
+                    pn.Param(self.vm.param.warning_msg, widgets={'warning_msg': {'type': pn.widgets.StaticText, 'styles': {'color': 'red', 'font-weight': 'bold'}}}),
                     "### PCA Projection",
                     pn.pane.Bokeh(self.vm.pca_plot)
                 ),
