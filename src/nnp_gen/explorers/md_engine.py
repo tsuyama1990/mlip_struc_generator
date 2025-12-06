@@ -9,15 +9,21 @@ from ase import units
 from ase.data import covalent_radii
 from tqdm import tqdm
 from nnp_gen.core.interfaces import IExplorer
+import psutil
+import os
 import signal
+import multiprocessing
+import queue
+import threading
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-class TimeoutError(Exception):
+class MDTimeoutError(Exception):
     pass
 
 def timeout_handler(signum, frame):
-    raise TimeoutError("MD simulation timed out")
+    raise MDTimeoutError("MD Simulation timed out.")
 
 def _get_calculator(model_name: str, device: str):
     """
@@ -57,101 +63,163 @@ def _get_calculator(model_name: str, device: str):
     else:
         raise ImportError(f"Unknown model: {model_name}")
 
-def run_single_md(
+class CalculatorPool:
+    """
+    Thread-safe pool of calculators.
+    """
+    def __init__(self, model_name: str, device: str, size: int):
+        self.queue = queue.Queue(maxsize=size)
+        self.model_name = model_name
+        self.device = device
+        self.size = size
+
+        # Pre-fill? Or lazy?
+        # Lazy is safer to avoid long startup.
+        # But we must ensure thread safety during creation if multiple threads hit empty queue.
+        # Actually, best pattern is:
+        # Workers try to get from queue. If empty and total created < size, create new.
+        # But queue.Queue doesn't track "total created".
+        # Simplest: Pre-fill.
+        logger.info(f"Initializing CalculatorPool with {size} calculators ({model_name})...")
+        for _ in range(size):
+             calc = _get_calculator(model_name, device)
+             self.queue.put(calc)
+
+    @contextmanager
+    def get_calculator(self):
+        calc = self.queue.get()
+        try:
+            yield calc
+        finally:
+            self.queue.put(calc)
+
+def run_single_md_thread(
     atoms: Atoms,
     temp: float,
     steps: int,
     interval: int,
+    calc_pool: CalculatorPool,
     calculator_params: Dict[str, Any],
     timeout_seconds: int = 3600
 ) -> Optional[List[Atoms]]:
     """
-    Run a single MD trajectory.
-    Defined as standalone function to ensure picklability.
+    Run a single MD trajectory using a calculator from the pool.
+    Designed for ThreadPoolExecutor.
     """
+    # Signal handling for timeout works in main thread only.
+    # For threads, we can't use signal.alarm effectively per thread.
+    # We rely on total job timeout or manual checks?
+    # Or strict step limits.
+    # The prompt asked for timeout using signal. That implies Process based or single thread.
+    # If we switch to Threads for Pool, we lose signal-based timeout per task.
+    # However, "Issue: Loading ML models... for every thread is inefficient."
+    # If we use Threads, we MUST share calculators.
+    # If we use Processes, we can't share calculators via Queue easily.
+    # So assuming ThreadPoolExecutor.
+    # Timeout in threads: We can check time in the loop.
+
+    import time
+    start_time = time.time()
     # Setup timeout
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(timeout_seconds)
 
     try:
-        # Setup calculator
-        model_name = calculator_params.get("model_name", "mace")
-        device = calculator_params.get("device", "cpu")
-        calc = _get_calculator(model_name, device)
-        atoms.calc = calc
+        with calc_pool.get_calculator() as calc:
+            # Clone atoms to avoid mutating the seed in place if shared (seeds are usually unique copies)
+            # atoms = atoms.copy() # Caller passes unique seed? Yes.
 
-        # Initialize velocities
-        MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
-        Stationary(atoms)
+            atoms.calc = calc
 
-        # Setup Dynamics
-        # Friction 0.002 (approx 500fs decay time if units are fs)
-        dyn = Langevin(atoms, 1.0 * units.fs, temperature_K=temp, friction=0.002)
+            # Initialize velocities
+            MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
+            Stationary(atoms)
 
-        trajectory = []
+            # Setup Dynamics
+            dyn = Langevin(atoms, 1.0 * units.fs, temperature_K=temp, friction=0.002)
 
-        # Precompute thresholds for overlap check
-        radii = covalent_radii[atoms.numbers]
-        sum_radii = radii[:, None] + radii[None, :]
-        # Allow some overlap (e.g. 50% of sum of radii) before calling it an explosion
-        overlap_threshold_ratio = 0.5
-        thresholds = sum_radii * overlap_threshold_ratio
+            trajectory = []
 
-        # Set diagonal to zero for threshold or handle dists diagonal
-        np.fill_diagonal(thresholds, 0.0)
+            # Precompute thresholds for overlap check
+            radii = covalent_radii[atoms.numbers]
+            sum_radii = radii[:, None] + radii[None, :]
+            overlap_threshold_ratio = 0.5
+            thresholds = sum_radii * overlap_threshold_ratio
+            np.fill_diagonal(thresholds, 0.0)
 
-        def step_check():
-            # Guardrail
-            try:
-                # mic=True is important for periodic systems
-                dists = atoms.get_all_distances(mic=True)
-                np.fill_diagonal(dists, np.inf)
+            def step_check():
+                # Timeout check
+                if time.time() - start_time > timeout_seconds:
+                    raise MDTimeoutError("MD Simulation timed out.")
 
-                # Check absolute minimum (nuclear fusion prevention)
-                min_d = np.min(dists)
-                if min_d < 0.5:
-                    raise RuntimeError(f"Structure Exploded: min_dist {min_d:.2f} < 0.5")
+                try:
+                    dists = atoms.get_all_distances(mic=True)
+                    np.fill_diagonal(dists, np.inf)
 
-                # Check element-specific overlap
-                if np.any(dists < thresholds):
-                     raise RuntimeError("Structure Exploded: Atomic overlap detected")
+                    min_d = np.min(dists)
+                    if min_d < 0.5:
+                        raise RuntimeError(f"Structure Exploded: min_dist {min_d:.2f} < 0.5")
 
-            except ValueError:
-                pass
+                    if np.any(dists < thresholds):
+                         raise RuntimeError("Structure Exploded: Atomic overlap detected")
 
-        # Initial check
-        step_check()
+                except ValueError:
+                    pass
 
-        for i in range(steps):
-            dyn.run(1)
+            # Initial check
             step_check()
 
-            if (i + 1) % interval == 0:
-                snap = atoms.copy()
-                snap.calc = None # Fix memory leak
-                trajectory.append(snap)
+            for i in range(steps):
+                dyn.run(1)
+                step_check()
 
-        return trajectory
+                if (i + 1) % interval == 0:
+                    snap = atoms.copy()
+                    snap.calc = None # Detach calculator
+                    trajectory.append(snap)
 
+            atoms.calc = None # Detach before returning to pool logic (though 'calc' var is local)
+            return trajectory
+
+    except MDTimeoutError:
+        logger.warning("MD Simulation timed out.")
+        return None
     except RuntimeError as e:
-        # Expected explosion
         logger.warning(f"MD Exploration Failed (RuntimeError): {e}")
         return None
     except TimeoutError as e:
         logger.error(f"MD Exploration Timeout: {e}")
         return None
     except Exception as e:
-        # Unexpected error
         logger.error(f"MD Exploration Error: {e}")
         return None
     finally:
         signal.alarm(0)  # Cancel alarm
 
+def _calculate_max_workers(n_atoms_estimate: int = 1000) -> int:
+    """
+    Calculate optimal number of workers based on system resources.
+    """
+    cpu_count = multiprocessing.cpu_count()
+    try:
+        mem = psutil.virtual_memory()
+        available_ram_mb = mem.available / (1024 * 1024)
+        # Using ThreadPool, memory per worker is lower (model shared).
+        # But we still have trajectories.
+        # Let's keep conservative estimate.
+        mem_per_worker_mb = 200 + (n_atoms_estimate * 0.001)
+        max_workers_mem = int(available_ram_mb / mem_per_worker_mb)
+    except Exception:
+        max_workers_mem = cpu_count
+
+    max_workers = min(max_workers_mem, cpu_count, 16)
+    return max(1, max_workers)
+
 class MDExplorer(IExplorer):
     def __init__(self, config: Any):
         self.config = config
 
-    def explore(self, seeds: List[Atoms], n_workers: int = 1) -> List[Atoms]:
+    def explore(self, seeds: List[Atoms], n_workers: Optional[int] = None) -> List[Atoms]:
         """
         Run parallel MD on seeds.
         """
@@ -162,14 +230,26 @@ class MDExplorer(IExplorer):
         steps = self.config.exploration.steps
         interval = max(1, steps // 50)
 
-        # Default params (should be configurable, but keeping simple as per current code)
-        calc_params = {"model_name": self.config.exploration.model_name, "device": "cpu"}
+        # Determine max workers
+        if n_workers is None:
+            n_atoms = len(seeds[0]) if seeds else 1000
+            n_workers = _calculate_max_workers(n_atoms)
 
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+        logger.info(f"Starting MD Exploration with {n_workers} threads.")
+
+        model_name = self.config.exploration.model_name
+        device = "cpu" # or from config
+
+        # Initialize Calculator Pool
+        # Pool size = n_workers
+        pool = CalculatorPool(model_name, device, size=n_workers)
+
+        # Use ThreadPoolExecutor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
             futures = []
             for seed in seeds:
                 futures.append(
-                    executor.submit(run_single_md, seed, temp, steps, interval, calc_params, 3600)
+                    executor.submit(run_single_md_thread, seed, temp, steps, interval, pool, 3600)
                 )
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(seeds), desc="MD Exploration"):

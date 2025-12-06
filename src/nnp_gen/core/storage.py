@@ -6,6 +6,9 @@ from ase.calculators.singlepoint import SinglePointCalculator
 import numpy as np
 from nnp_gen.core.models import StructureMetadata
 from nnp_gen.core.interfaces import IStorage
+import logging
+
+logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
@@ -62,24 +65,33 @@ class DatabaseManager(IStorage):
     def bulk_save(self, atoms_list: List[Atoms], metadata_list: List[StructureMetadata]) -> List[int]:
         """
         Save multiple structures in a transaction.
+        If the database supports transactions (e.g. SQLite via ase.db),
+        changes are only committed if the block exits without exception.
         """
         ids = []
         try:
+            # Use 'with self.db:' to ensure transaction behavior
+            # ASE's SQLite backend uses 'with con: ...' which commits on success, rollbacks on error.
             with self.db:
                 for atoms, meta in zip(atoms_list, metadata_list):
                     ids.append(self.save_atoms(atoms, meta))
             return ids
         except Exception as e:
-            logger.error(f"Database write failed: {e}")
+            logger.error(f"Bulk save failed, rolling back transaction. Error: {e}")
+            # The transaction context manager should have rolled back
             raise e
 
     def update_sampling_status(self, ids: List[int], method: str):
         """
         Update is_sampled and sampling_method for given IDs.
         """
-        with self.db:
-            for id in ids:
-                self.db.update(id, is_sampled=True, sampling_method=method)
+        try:
+            with self.db:
+                for id in ids:
+                    self.db.update(id, is_sampled=True, sampling_method=method)
+        except Exception as e:
+            logger.error(f"Failed to update sampling status: {e}")
+            raise e
 
     def get_sampled_structures(self) -> Iterator[Atoms]:
         """
