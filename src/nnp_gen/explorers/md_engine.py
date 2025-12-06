@@ -146,8 +146,12 @@ def run_single_md_thread(
                     if np.any(dists < thresholds):
                          raise RuntimeError("Structure Exploded: Atomic overlap detected")
 
-                except ValueError:
+                except ValueError as e:
+                    logger.warning(f"MD Step Check Failed (ValueError): {e}")
                     pass
+                except Exception as e:
+                    logger.error(f"MD Step Check Error: {e}")
+                    raise e
 
             # Initial check
             step_check()
@@ -163,6 +167,10 @@ def run_single_md_thread(
                     snap = atoms.copy()
                     snap.calc = None # Detach calculator
                     trajectory.append(snap)
+                
+                # Progress logging every 10%
+                if steps >= 10 and (i + 1) % max(1, steps // 10) == 0:
+                    logger.info(f"MD Progress: {i + 1}/{steps}")
 
             atoms.calc = None # Detach before returning to pool logic (though 'calc' var is local)
             return trajectory

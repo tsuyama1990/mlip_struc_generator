@@ -132,13 +132,15 @@ class JobManager:
 
                     job_logger.info(f"Job {job_id} Completed Successfully")
                 except Exception as inner_e:
+                    # Log before updating status to avoid race conditions in monitoring
+                    logging.getLogger("nnp_gen").error(f"Job Execution Failed: {inner_e}", exc_info=True)
+
                     with self._jobs_lock:
                         job = self.jobs[job_id]
                         job.status = JobStatus.FAILED
                         job.end_time = datetime.now()
                         job.error_message = str(inner_e)
 
-                    logging.getLogger("nnp_gen").error(f"Job Execution Failed: {inner_e}", exc_info=True)
                     raise inner_e
 
         except Exception as e:

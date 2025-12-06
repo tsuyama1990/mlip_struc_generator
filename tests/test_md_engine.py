@@ -1,9 +1,10 @@
 import pytest
 import sys
 from unittest.mock import MagicMock
+from contextlib import contextmanager
 import numpy as np
 from ase import Atoms
-from nnp_gen.explorers.md_engine import run_single_md, MDExplorer, _get_calculator
+from nnp_gen.explorers.md_engine import run_single_md_thread, MDExplorer, _get_calculator, CalculatorPool
 
 class MockCalculator:
     def get_forces(self, atoms):
@@ -29,12 +30,24 @@ def test_get_calculator_mace(mock_deps, mocker):
     calc = _get_calculator("mace", "cpu")
     assert isinstance(calc, MockCalculator)
 
+# Helper to mock pool
+class MockPool:
+    def __init__(self):
+        self.calc = MockCalculator()
+    
+    @contextmanager
+    def get_calculator(self):
+        yield self.calc
+
 def test_run_single_md_success(mocker):
     # Mock _get_calculator to avoid imports and logic
     mocker.patch("nnp_gen.explorers.md_engine._get_calculator", return_value=MockCalculator())
 
     atoms = Atoms('H2', positions=[[0,0,0], [2,0,0]])
-    traj = run_single_md(atoms, temp=300, steps=10, interval=2, calculator_params={})
+    mock_pool = MockPool()
+    
+    # Signature: (atoms, temp, steps, interval, calc_pool, calculator_params, timeout_seconds)
+    traj = run_single_md_thread(atoms, temp=300, steps=10, interval=2, calc_pool=mock_pool, calculator_params={})
 
     assert traj is not None
     # 10 steps. (i+1)%2 == 0 -> 2, 4, 6, 8, 10. 5 frames.
@@ -45,15 +58,17 @@ def test_run_single_md_explosion(mocker):
 
     # Atoms very close -> 0.1 < 0.6
     atoms = Atoms('H2', positions=[[0,0,0], [0.1,0,0]])
-    traj = run_single_md(atoms, temp=300, steps=10, interval=1, calculator_params={})
+    mock_pool = MockPool()
+    
+    traj = run_single_md_thread(atoms, temp=300, steps=10, interval=1, calc_pool=mock_pool, calculator_params={})
 
     assert traj is None
 
 def test_explore_parallel(mocker):
-    # Mock ProcessPoolExecutor to avoid spawning processes
+    # Mock ThreadPoolExecutor (changed from ProcessPoolExecutor)
     mock_executor = MagicMock()
     mock_executor.__enter__.return_value = mock_executor
-    mocker.patch("concurrent.futures.ProcessPoolExecutor", return_value=mock_executor)
+    mocker.patch("concurrent.futures.ThreadPoolExecutor", return_value=mock_executor)
 
     # Mock submit
     mock_future = MagicMock()
@@ -61,13 +76,15 @@ def test_explore_parallel(mocker):
     mock_executor.submit.return_value = mock_future
 
     # Mock as_completed
-    # Since explore calls as_completed(futures), we simulate it returning the futures
-    # We pass 2 seeds, so 2 futures submitted
     mocker.patch("concurrent.futures.as_completed", return_value=[mock_future, mock_future])
+
+    # Mock CalculatorPool init to avoid real calc creation
+    mocker.patch("nnp_gen.explorers.md_engine.CalculatorPool")
 
     config = MagicMock()
     config.exploration.temperature = 300
     config.exploration.steps = 100
+    config.exploration.model_name = "mace"
 
     explorer = MDExplorer(config)
     seeds = [Atoms('H'), Atoms('He')]

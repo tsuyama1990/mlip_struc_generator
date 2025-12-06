@@ -17,6 +17,8 @@ def validate_element(el: str) -> str:
     if not isinstance(el, str):
          raise ValueError(f"Element must be a string, got {type(el)}")
     el_clean = el.strip().capitalize()
+    if el_clean == 'X':
+        raise ValueError(f"Invalid element symbol: {el} ('X' is a dummy element)")
     if el_clean not in chemical_symbols:
         # chemical_symbols contains 'X' as a dummy sometimes, but usually proper elements.
         # atomic_numbers is a safer check if we want real elements.

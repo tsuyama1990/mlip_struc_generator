@@ -215,6 +215,22 @@ class ConfigViewModel(param.Parameterized):
                      self.progress_value = max(self.progress_value, 75)
                  if "Step 4: Saving" in content:
                      self.progress_value = max(self.progress_value, 90)
+                 
+                 # Detailed MD Progress
+                 # Log format: "MD Progress: 500/1000"
+                 # We want to map this to range [25, 50] (Exploration phase)
+                 import re
+                 md_prog_match = re.findall(r"MD Progress: (\d+)/(\d+)", content)
+                 if md_prog_match:
+                     # Take the last match
+                     current, total = md_prog_match[-1]
+                     try:
+                         perc = float(current) / float(total)
+                         # Map 0-100% MD to 50-75% overall (Step 2 to Step 3)
+                         overall_perc = 50 + (perc * 25)
+                         self.progress_value = max(self.progress_value, int(overall_perc))
+                     except ZeroDivisionError:
+                         pass
             elif status == "completed":
                 self.progress_value = 100
                 self.progress_active = False

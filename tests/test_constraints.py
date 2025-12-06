@@ -76,29 +76,47 @@ def test_dynamic_filter_sanity_check():
 def test_dynamic_filter_density():
     """
     Test min_density filtering.
+    We construct a system that passes vacuum check (filled 1D chain) but fails density check.
     """
     constraints = PhysicsConstraints(
-        min_density=1.0,
+        min_density=1.0, # Water density roughly
         min_cell_length_factor=0.0,
         r_cut=1.0
     )
     config = AlloySystemConfig(
         type="alloy",
-        elements=["Cu"],
+        elements=["H"],
         constraints=constraints,
         rattle_std=0.0,
-        vol_scale_range=[1.0, 1.0]
+        vol_scale_range=[1.0, 1.0],
+        # Only periodic in X to make vacuum check easier to satisfy
+        pbc=[True, False, False]
     )
 
-    struct_low = Atoms('Cu', positions=[[5,5,5]], cell=[10,10,10])
-    struct_high = Atoms('Cu', positions=[[0,0,0]], cell=[2,2,2])
+    # struct_low: 10 H atoms in [10, 5, 5] cell.
+    # Atoms spaced along X.
+    # Vacuum check: X axis filled (0..10). Y, Z skipped due to pbc=False.
+    # Density: Mass = 10 * 1.008 = 10.08. Vol = 10*5*5 = 250.
+    # Density = 10.08 / 250 = 0.04 < 1.0. -> Should be invalid.
+    struct_low = Atoms('H10', 
+                       positions=[[i, 2.5, 2.5] for i in range(10)], 
+                       cell=[10, 5, 5], 
+                       pbc=[True, False, False])
+    
+    # struct_high: 10 H atoms in [10, 1, 1] cell.
+    # Density: Mass = 10.08. Vol = 10*1*1 = 10.
+    # Density = 1.008 >= 1.0 (approx). 
+    # Let's make it denser. [5, 1, 1]. Vol=5. Density=2.0.
+    struct_high = Atoms('H10', 
+                        positions=[[i*0.5, 0.5, 0.5] for i in range(10)], 
+                        cell=[5, 1, 1], 
+                        pbc=[True, False, False])
 
     gen = MockGenerator(config, [struct_low, struct_high])
     valid = gen.generate()
 
     assert len(valid) == 1
-    assert len(valid[0]) == 1
-    assert np.allclose(valid[0].cell.lengths(), [2,2,2])
+    assert valid[0].cell[0,0] == 5.0 # Check it's the high density one
 
 # --- 3. Boundary Condition Test ---
 
