@@ -1,0 +1,34 @@
+output_dir: tutorials/01_alloy_fe_pt/output
+seed: 123
+
+system:
+  type: alloy
+  elements: [Fe, Pt]
+  constraints:
+    max_atoms: 100
+    min_density: 5.0
+    min_distance: 1.8
+    min_cell_length_factor: 1.0
+    r_cut: 4.0
+  pbc: [true, true, true]
+  rattle_std: 0.05
+  vol_scale_range: [0.90, 1.10]
+  lattice_constant: 3.8
+  spacegroup: 225
+  supercell_size: [2, 2, 2]
+  default_magmoms:
+    Fe: 3.0
+    Pt: 0.0
+
+exploration:
+  method: md
+  model_name: mace
+  temperature: 600
+  steps: 50
+  timestep: 1.0
+
+sampling:
+  strategy: random
+  n_samples: 5
+  descriptor_type: soap
+  min_distance: 1.5
