@@ -1,55 +1,95 @@
-# MLIP Structure Generator (nnp_gen)
+# NNP Generation Pipeline
 
-A robust pipeline for generating training datasets for Neural Network Potentials (NNP/MLIP).
+## Overview
 
-## Features
-- **Structure Generation**: Support for Alloys, Ionic crystals, Covalent systems, and Molecules.
-- **Physics Validation**: Enforces density, minimum distance, and cell size constraints.
-- **MD Exploration**: Runs molecular dynamics (via MACE/SevenNet or fallback) to explore phase space.
-- **Sampling**: Diverse sampling using FPS (SOAP descriptors) or Random selection.
-- **Database**: Stores structures and provenance metadata in ASE Database (SQLite).
+This project provides a pipeline for generating dataset structures for Neural Network Potentials (NNP).
+It supports Alloy, Ionic, Covalent, and Molecular systems.
+Key features:
+- Structure generation using `ase`, `pymatgen`, `icet`, `pyxtal`.
+- Physics-based validation (density, atomic distance).
+- MD exploration using `ase` (Langevin dynamics).
+- Sampling strategies: Random, FPS (Farthest Point Sampling) with SOAP descriptors.
+- Web UI dashboard for configuration and visualization.
 
 ## Installation
 
-Requires Python >= 3.10 and < 3.14.
+### Prerequisites
 
-```bash
-pip install .
-```
+- Python 3.10+
+- [uv](https://github.com/astral-sh/uv) (Recommended)
 
-For heavy dependencies (optional but recommended for full functionality):
-```bash
-pip install .[all]
-```
+### Setup
+
+1.  **Install uv** (if not installed):
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+
+2.  **Sync Environment**:
+    ```bash
+    uv sync
+    ```
+    This will create a virtual environment and install all dependencies.
+
+3.  **Activate Environment**:
+    ```bash
+    source .venv/bin/activate
+    ```
 
 ## Usage
 
-Run the pipeline using the CLI:
+### Command Line Interface (CLI)
 
+The pipeline is managed via `hydra`. The main entry point is `main.py`.
+
+Run with default configuration:
 ```bash
 python main.py
 ```
 
-### Configuration
-The pipeline is configured via `config/config.yaml`. You can override parameters from command line using Hydra syntax:
-
+Override configuration parameters:
 ```bash
-# Run for a different system (e.g. Ionic)
-python main.py system.type=ionic system.elements=[Li,F] system.oxidation_states="{Li:1, F:-1}"
-
-# Change exploration settings
-python main.py exploration.steps=1000 exploration.temperature=500
+python main.py system=alloy system.elements=["Cu","Au"] exploration.steps=100
 ```
 
-## Architecture
-- `src/nnp_gen/core`: Core physics logic, config models, and interfaces.
-- `src/nnp_gen/generators`: Structure generators (Alloy, Ionic, Covalent, Molecule).
-- `src/nnp_gen/explorers`: MD engine.
-- `src/nnp_gen/samplers`: Sampling logic (FPS, Random).
-- `src/nnp_gen/pipeline`: Orchestration.
+### Web UI
 
-## Testing
-Run tests with:
+To launch the dashboard:
 ```bash
-pytest tests
+python main_gui.py
+```
+Open your browser at `http://localhost:5006`.
+
+## Development
+
+### Running Tests
+
+```bash
+uv run pytest
+```
+
+### Project Structure
+
+- `src/nnp_gen`: Source code.
+  - `core`: Core logic, interfaces, configuration models.
+  - `generators`: Structure generators (Alloy, Ionic, etc.).
+  - `explorers`: MD exploration engine.
+  - `samplers`: Sampling strategies (FPS, Random).
+  - `pipeline`: Pipeline orchestration.
+  - `web_ui`: Panel-based dashboard.
+- `config`: Hydra configuration files.
+- `tests`: Unit and integration tests.
+
+## Dependency Management
+
+Dependencies are managed in `pyproject.toml`.
+To add a new dependency:
+```bash
+uv add <package_name>
+```
+
+To update dependencies:
+```bash
+uv lock
+uv sync
 ```

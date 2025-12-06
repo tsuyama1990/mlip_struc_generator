@@ -1,8 +1,9 @@
 import logging
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Dict
 from ase import Atoms
 from ase.build import bulk
+from ase.data import covalent_radii, atomic_numbers
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import IonicSystemConfig
 from nnp_gen.core.exceptions import GenerationError
@@ -18,10 +19,18 @@ class IonicGenerator(BaseGenerator):
         try:
             import pymatgen.core as pmg
             from pymatgen.symmetry.structure import SymmetrizedStructure
+            from pymatgen.core import Lattice, Species, Element
             self.pmg = pmg
+            self.Species = Species
+            self.Lattice = Lattice
+            self.Element = Element
             self.has_pmg = True
         except ImportError:
             self.has_pmg = False
+            self.pmg = None
+            self.Lattice = None
+            self.Species = None
+            self.Element = None
             logger.warning("pymatgen not installed. IonicGenerator functionality will be severely limited.")
 
     def _generate_impl(self) -> List[Atoms]:
@@ -49,55 +58,73 @@ class IonicGenerator(BaseGenerator):
 
         return structures
 
+    def _get_heuristic_radius(self, species_str: str, charge: Optional[int] = None) -> float:
+        """
+        Get the radius of a species for lattice constant estimation using a tiered heuristic.
+
+        Tier 1: Shannon effective ionic radii (via pymatgen).
+        Tier 2: Electronegativity-scaled fallback (TODO: refined scaling), currently standard atomic/ionic.
+        Tier 3: Geometric considerations are handled in _create_binary_prototypes.
+        """
+        if not self.has_pmg:
+             # Tier 2 Fallback (No pymatgen): ASE covalent radii
+             # Simple heuristic: for ions, covalent radii are often too large for cations
+             # and too small for anions, but we lack data to correct it properly without a table.
+             return covalent_radii[atomic_numbers[species_str]]
+
+        # Tier 1: Oxidation State Inference / Shannon Radii
+        if charge is not None:
+            try:
+                # Use Species class to get Shannon radius
+                # Using coordination number 6 ("VI") as a standard reference for rocksalt
+                sp = self.Species(species_str, oxidation_state=charge)
+                radius = sp.get_shannon_radius(cn="VI")
+                if radius:
+                    return radius
+            except Exception:
+                pass # Fall through to next tier
+
+        el = self.Element(species_str)
+
+        # Tier 2: Fallbacks
+
+        # 2a. Average ionic radius (if available in pymatgen data)
+        if el.average_ionic_radius:
+            return el.average_ionic_radius
+
+        # 2b. Atomic radius (often covalent)
+        r_atomic = el.atomic_radius
+        if r_atomic:
+            # Electronegativity correction could go here if we had a target structure context
+            # For now, we warn if we are deep in fallback territory for an ionic generator
+            logger.debug(f"Using atomic radius for {species_str} (fallback)")
+            return r_atomic
+
+        # 2c. Ultimate fallback
+        return 1.5
+
     def _generate_with_pymatgen(self) -> List[Atoms]:
         """
         Use pymatgen to replace species in prototype structures.
         """
         generated = []
-
-        # Define some common binary prototypes (spacegroup number, symbol)
-        # 225: Rocksalt (Fm-3m)
-        # 221: CsCl (Pm-3m)
-        # 216: Zincblende (F-43m)
-        # 225: Fluorite (Fm-3m) - AB2
-
-        # We can create dummy structures and replace species
-        # But we need appropriate lattice constants.
-        # Pymatgen's Structure.from_spacegroup requires lattice parameters.
-        # We can estimate bond lengths from ionic radii.
-
         elements = self.config.elements
         oxidation_states = self.config.oxidation_states
 
-        # Get ionic radii to estimate lattice constant
-        # This is a bit complex without a database query.
-        # As a heuristic, we can use sum of atomic radii or look up tables if we had them.
-        # pymatgen Element class has atomic_radius.
-
-        radii_sum = 0.0
+        # Get radii to estimate lattice constant
+        radii_map = {}
         for el_str in elements:
-            el = self.pmg.Element(el_str)
-            # Use atomic radius as approximation if ionic not available easily without knowing coord number
-            r = el.atomic_radius
-            if r is None:
-                r = 1.5 # fallback
-            radii_sum += r
+            charge = oxidation_states.get(el_str)
+            radii_map[el_str] = self._get_heuristic_radius(el_str, charge)
 
-        # Simplified logic: Generate a few common structure types if stoichiometry matches
-
-        # Determine likely stoichiometry from oxidation states
-        # This is strictly combinatorics if we don't know the compound.
-        # But the user provides a list of elements.
-        # If 2 elements, we assume binary.
+        logger.info(f"Using radii for generation: {radii_map}")
 
         if len(elements) == 2:
             el1, el2 = elements
             q1 = oxidation_states[el1]
             q2 = oxidation_states[el2]
 
-            # Simple charge balance check: n1*q1 + n2*q2 = 0
-            # Rocksalt: 1:1 -> q1 = -q2
-            # Fluorite: 1:2 -> q1 = -2*q2 or 2*q1 = -q2
+            radii_sum = radii_map[el1] + radii_map[el2]
 
             # 1. Rocksalt / CsCl / Zincblende (1:1)
             if abs(q1) == abs(q2):
@@ -105,52 +132,63 @@ class IonicGenerator(BaseGenerator):
 
             # 2. Fluorite / Antifluorite (1:2 or 2:1)
             elif abs(q1) == 2 * abs(q2):
-                # el1 is +4 or +2, el2 is -2 or -1. Formula AB2
+                # AB2
                 generated.extend(self._create_binary_prototypes(el1, el2, radii_sum, ["fluorite"]))
             elif 2 * abs(q1) == abs(q2):
-                # Formula A2B
+                # A2B (Anti-fluorite structure is fluorite with swapped positions)
                 generated.extend(self._create_binary_prototypes(el2, el1, radii_sum, ["fluorite"]))
-
-        # If no specific logic matched or just as a catch-all, we might try generic substitution
-        # but that's risky without valid physics.
 
         return generated
 
     def _create_binary_prototypes(self, species_a: str, species_b: str, radii_sum: float, types: List[str]) -> List[Atoms]:
         structures = []
 
-        # Estimate lattice parameter 'a'
-        # Rocksalt: a = 2 * (r_cation + r_anion) roughly?
-        # For NaCl: rNa=1.02, rCl=1.81 (ionic). Sum=2.83. a_exp=5.64. So 2*sum is good estimate.
-        # CsCl: 2*r = sqrt(3)/2 * a  => a = 4/sqrt(3) * r ~ 2.3 * r
-        # Zincblende: 2*r = sqrt(3)/4 * a => a = 8/sqrt(3) * r ~ 4.6 * r
-
-        # We'll use a rough heuristic and then maybe let MD/optimization fix it later?
-        # The prompt asks to remove hardcoded a=5.0 and use pymatgen/radii.
+        # Tier 3: Geometric Debug / Correct Pre-factors
+        # Ensure correct a = f(r) math
 
         for t in types:
             try:
                 struct = None
                 if t == "rocksalt":
+                    # For Rocksalt (face-centered cubic, Fm-3m)
+                    # Nearest neighbor distance d = r_A + r_B = radii_sum
+                    # Lattice constant a = 2 * d
                     a = 2.0 * radii_sum
-                    struct = self.pmg.Structure.from_spacegroup("Fm-3m", Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.5,0.5,0.5]])
+                    struct = self.pmg.Structure.from_spacegroup("Fm-3m", self.Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.5,0.5,0.5]])
+
                 elif t == "cscl":
-                    # CsCl (B2): 8-coord. d = a * sqrt(3)/2 => a = 2/sqrt(3) * d ~ 1.15 * d
+                    # CsCl (Simple Cubic based, Pm-3m)
+                    # Nearest neighbor (body diagonal) d = sqrt(3)/2 * a
+                    # => a = 2/sqrt(3) * d
                     a = (2.0 / np.sqrt(3.0)) * radii_sum
-                    struct = self.pmg.Structure.from_spacegroup("Pm-3m", Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.5,0.5,0.5]])
+                    struct = self.pmg.Structure.from_spacegroup("Pm-3m", self.Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.5,0.5,0.5]])
+
                 elif t == "zincblende":
-                    # Zincblende (B3): 4-coord. d = a * sqrt(3)/4 => a = 4/sqrt(3) * d ~ 2.31 * d
+                    # Zincblende (F-43m)
+                    # Nearest neighbor (quarter body diagonal) d = sqrt(3)/4 * a
+                    # => a = 4/sqrt(3) * d
                     a = (4.0 / np.sqrt(3.0)) * radii_sum
-                    struct = self.pmg.Structure.from_spacegroup("F-43m", Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.25,0.25,0.25]])
+                    struct = self.pmg.Structure.from_spacegroup("F-43m", self.Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.25,0.25,0.25]])
+
                 elif t == "fluorite":
-                    # CaF2: Ca at 0,0,0; F at 0.25,0.25,0.25 and 0.75,0.75,0.75
-                    # Bond length d = sqrt(3)/4 * a. d ~ sum_radii.
-                    a = 4.0/np.sqrt(3.0) * radii_sum
-                    struct = self.pmg.Structure.from_spacegroup("Fm-3m", Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.25,0.25,0.25]])
+                    # Fluorite CaF2 (Fm-3m)
+                    # Nearest neighbor distance d (Ca-F) is sqrt(3)/4 * a
+                    # => a = 4/sqrt(3) * d
+                    a = (4.0 / np.sqrt(3.0)) * radii_sum
+                    struct = self.pmg.Structure.from_spacegroup("Fm-3m", self.Lattice.cubic(a), [species_a, species_b], [[0,0,0], [0.25,0.25,0.25]])
 
                 if struct:
                     atoms = self._pmg_to_ase(struct)
-                    # Expand supercell
+
+                    # Note on Supercells:
+                    # We generate the unit cell above with physically correct 'a'.
+                    # However, MLIP training often requires a minimum simulation box size (r_cut).
+                    # The BaseGenerator pipeline will apply `ensure_supercell_size` later,
+                    # which may expand this unit cell. This is intended behavior.
+
+                    # We also apply explicit supercell expansion from config here if requested,
+                    # though arguably this should also be handled by the pipeline or configured carefully.
+                    # Current logic: apply config-based expansion.
                     atoms = atoms * self.config.supercell_size
                     structures.append(atoms)
             except Exception as e:
@@ -160,8 +198,6 @@ class IonicGenerator(BaseGenerator):
 
     def _pmg_to_ase(self, struct) -> Atoms:
         """Convert pymatgen Structure to ASE Atoms"""
-        # We can use pymatgen.io.ase.AseAtomsAdaptor but avoiding extra imports if possible
-        # Or just manual conversion
         symbols = [str(s) for s in struct.species]
         positions = struct.cart_coords
         cell = struct.lattice.matrix
@@ -176,28 +212,21 @@ class IonicGenerator(BaseGenerator):
         structures = []
         elements = self.config.elements
 
-        # Only support binary rocksalt as fallback for now (improving on original code slightly by guessing lattice)
         if len(elements) == 2:
             cation, anion = elements
 
-            # Rough estimate of lattice constant without radii data (hard to do accurately without data)
-            # We will use a slightly better heuristic or default if we must.
-            # But really we should just fail if accuracy is required.
-            # However, I'll keep the logic but maybe just warn.
-
-            # If we don't have radii, we can't guess 'a' well.
-            # The user explicitly asked to remove hardcoded a=5.0.
-            # But without pymatgen, we don't have easy access to radii.
-            # I will check if ASE has data.
-            from ase.data import covalent_radii, atomic_numbers
-
+            # Use ASE covalent radii
             r1 = covalent_radii[atomic_numbers[cation]]
             r2 = covalent_radii[atomic_numbers[anion]]
-            # Ionic radii are usually different but covalent sum is a better guess than 5.0
-            # Rocksalt: a = 2 * d. d ~ r1+r2 (very roughly)
+
+            # Estimate lattice constant for Rocksalt
+            # a = 2 * (r1 + r2)
             a = 2.0 * (r1 + r2)
 
+            logger.info(f"Fallback: Generating Rocksalt for {cation}-{anion} with a={a:.2f}")
+
             try:
+                # 'NaCl' is just a prototype in ase.build.bulk
                 prim = bulk('NaCl', 'rocksalt', a=a)
                 new_symbols = []
                 for s in prim.get_chemical_symbols():
@@ -210,11 +239,6 @@ class IonicGenerator(BaseGenerator):
                 structures.append(atoms)
             except Exception as e:
                  logger.error(f"Fallback generation failed: {e}")
+                 raise GenerationError(f"Fallback generation failed for {elements}: {e}")
 
         return structures
-
-# Need to import Lattice for _create_binary_prototypes if using pymatgen
-try:
-    from pymatgen.core import Lattice
-except ImportError:
-    pass

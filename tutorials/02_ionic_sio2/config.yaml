@@ -1,0 +1,33 @@
+output_dir: tutorials/02_ionic_sio2/output
+seed: 456
+
+system:
+  type: ionic
+  elements: [Si, O]
+  oxidation_states:
+    Si: 4
+    O: -2
+  constraints:
+    max_atoms: 100
+    min_density: 1.5
+    min_distance: 1.2
+    min_cell_length_factor: 1.0
+    r_cut: 4.0
+  pbc: [true, true, true]
+  rattle_std: 0.02
+  vol_scale_range: [0.90, 1.10]
+  supercell_size: [2, 2, 2]
+  charge_balance_tolerance: 0.0
+
+exploration:
+  method: md
+  model_name: mace
+  temperature: 500
+  steps: 50
+  timestep: 1.0
+
+sampling:
+  strategy: random
+  n_samples: 5
+  descriptor_type: soap
+  min_distance: 1.5

@@ -1,11 +1,15 @@
 import ase.db
+import logging
 from typing import List, Iterator, Optional, Any
 from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 import numpy as np
 from nnp_gen.core.models import StructureMetadata
+from nnp_gen.core.interfaces import IStorage
 
-class DatabaseManager:
+logger = logging.getLogger(__name__)
+
+class DatabaseManager(IStorage):
     """
     Manager for ASE Database persistence with Pydantic metadata validation.
     """
@@ -60,10 +64,14 @@ class DatabaseManager:
         Save multiple structures in a transaction.
         """
         ids = []
-        with self.db:
-            for atoms, meta in zip(atoms_list, metadata_list):
-                ids.append(self.save_atoms(atoms, meta))
-        return ids
+        try:
+            with self.db:
+                for atoms, meta in zip(atoms_list, metadata_list):
+                    ids.append(self.save_atoms(atoms, meta))
+            return ids
+        except Exception as e:
+            logger.error(f"Database write failed: {e}")
+            raise e
 
     def update_sampling_status(self, ids: List[int], method: str):
         """

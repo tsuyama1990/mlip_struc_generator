@@ -1,5 +1,6 @@
-from typing import Literal, Union, List, Dict, Optional, Tuple
+from typing import Literal, Union, List, Dict, Optional, Tuple, Any
 import numpy as np
+from enum import Enum
 from pydantic import BaseModel, Field, model_validator, field_validator
 
 # --- System Configuration ---
@@ -17,6 +18,17 @@ class BaseSystemConfig(BaseModel):
     pbc: List[bool] = Field([True, True, True], description="Periodic Boundary Conditions")
     rattle_std: float = Field(0.01, description="Standard deviation for Gaussian rattle in Angstrom")
     vol_scale_range: List[float] = Field([0.95, 1.05], min_length=2, max_length=2, description="Min/Max scaling factors for volume augmentation")
+
+    @field_validator('elements')
+    @classmethod
+    def validate_elements(cls, v: List[str]) -> List[str]:
+        from ase.data import chemical_symbols
+        # chemical_symbols[0] is 'X', [1] is 'H'.
+        valid_symbols = set(chemical_symbols)
+        for el in v:
+            if el not in valid_symbols:
+                raise ValueError(f"Invalid element symbol: {el}")
+        return v
 
     @field_validator('rattle_std')
     @classmethod
@@ -60,12 +72,123 @@ class MoleculeSystemConfig(BaseSystemConfig):
     # Molecules usually don't have supercell expansion in the same way, or pbc is False
     pbc: List[bool] = Field([False, False, False], description="Periodic Boundary Conditions for Molecules")
 
+class InterfaceMode(str, Enum):
+    HETERO_CRYSTAL = "hetero_crystal"  # Solid on Solid (e.g., Cu on Au)
+    SOLID_LIQUID = "solid_liquid"      # Liquid on Solid (e.g., Water on TiO2)
+
+class InterfaceSystemConfig(BaseSystemConfig):
+    type: Literal["interface"] = "interface"
+    mode: InterfaceMode
+
+    # RECURSIVE CONFIGURATION:
+    # We re-use the specific configs for the two phases.
+    phase_a: Dict[str, Any] = Field(..., description="Config dict for the substrate (e.g. Alloy)")
+    phase_b: Dict[str, Any] = Field(..., description="Config dict for the film/liquid")
+
+    # Interface Physics
+    vacuum: float = Field(15.0, description="Vacuum padding in Angstrom")
+    interface_distance: float = Field(2.5, description="Initial distance between phases")
+    max_mismatch: float = Field(0.05, description="Max allowed lattice mismatch (5%)")
+
+    # For Solid-Liquid
+    solvent_density: float = Field(1.0, description="Target liquid density in g/cm^3")
+
+    elements: List[str] = Field(default=[], description="List of elements in the system")
+
+    @model_validator(mode='before')
+    @classmethod
+    def extract_elements(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # If elements are not explicitly provided, try to extract from phases
+            if 'elements' not in data or not data['elements']:
+                elems = set()
+                for phase_key in ['phase_a', 'phase_b']:
+                    if phase_key in data and isinstance(data[phase_key], dict):
+                        phase_elements = data[phase_key].get('elements', [])
+                        if phase_elements:
+                            elems.update(phase_elements)
+
+                # If we found elements, set them
+                if elems:
+                    data['elements'] = list(elems)
+        return data
+
+class AdsorbateMode(str, Enum):
+    ATOM = "atom"
+    MOLECULE = "molecule"
+    SMILES = "smiles"
+    FILE = "file"
+
+class AdsorbateConfig(BaseModel):
+    source: str = Field(..., description="Element symbol, Formula, SMILES, or Filepath")
+    mode: AdsorbateMode = Field(..., description="Interpretation of the source string")
+    count: int = Field(1, ge=1, description="Number of adsorbates to place")
+    height: float = Field(2.0, description="Height above the surface")
+
+    @field_validator('count')
+    @classmethod
+    def validate_count(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("Count must be at least 1")
+        return v
+
+class VacuumAdsorbateSystemConfig(BaseSystemConfig):
+    type: Literal["vacuum_adsorbate"] = "vacuum_adsorbate"
+    substrate: Dict[str, Any] = Field(..., description="Configuration for the bulk substrate")
+    miller_indices: List[Tuple[int, int, int]] = Field(..., description="List of Miller indices to cleave")
+    layers: int = Field(4, description="Number of atomic layers in the slab")
+    vacuum: float = Field(10.0, description="Vacuum size on top of the surface")
+    defect_rate: float = Field(0.0, ge=0.0, le=1.0, description="Fraction of top-layer atoms to remove")
+    adsorbates: List[AdsorbateConfig] = Field(default_factory=list, description="List of adsorbates to place")
+
+    @field_validator('defect_rate')
+    @classmethod
+    def validate_defect_rate(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+             raise ValueError("defect_rate must be between 0.0 and 1.0")
+        return v
+
+    @model_validator(mode='before')
+    @classmethod
+    def extract_elements(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if 'elements' not in data or not data['elements']:
+                elems = set()
+                # Substrate elements
+                if 'substrate' in data and isinstance(data['substrate'], dict):
+                     elems.update(data['substrate'].get('elements', []))
+                if elems:
+                    data['elements'] = list(elems)
+        return data
+
+class SolventAdsorbateSystemConfig(VacuumAdsorbateSystemConfig):
+    type: Literal["solvent_adsorbate"] = "solvent_adsorbate"
+    solvent_density: float = Field(1.0, description="Target solvent density in g/cm^3")
+    solvent_smiles: str = Field("O", description="SMILES string for the solvent (default Water)")
+
+class UserFileSystemConfig(BaseSystemConfig):
+    type: Literal["user_file"] = "user_file"
+    path: str = Field(..., description="Path to the structure file")
+    format: Optional[str] = Field(None, description="File format (e.g., 'cif', 'xyz'). If None, inferred from extension.")
+    repeat: int = Field(1, description="Number of times to duplicate the structures")
+
+    @field_validator('repeat')
+    @classmethod
+    def validate_repeat(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("repeat must be at least 1")
+        return v
+
 # Discriminated Union for System Config
 SystemConfig = Union[
     IonicSystemConfig,
     AlloySystemConfig,
     CovalentSystemConfig,
-    MoleculeSystemConfig
+    MoleculeSystemConfig,
+    InterfaceSystemConfig,
+    VacuumAdsorbateSystemConfig,
+    SolventAdsorbateSystemConfig,
+    UserFileSystemConfig
 ]
 
 # --- Exploration Configuration ---

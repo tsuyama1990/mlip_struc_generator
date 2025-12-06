@@ -1,0 +1,38 @@
+# Config for a Solvated, Defected, Adsorbed Alloy Surface
+app:
+  system:
+    type: solvent_adsorbate
+    substrate:
+      type: alloy
+      elements: [Fe, Pt]
+      lattice_constant: 3.8
+      spacegroup: 225
+      supercell_size: [1, 1, 1]
+    miller_indices:
+      - [1, 1, 1]
+    layers: 4
+    vacuum: 15.0
+    defect_rate: 0.1
+    adsorbates:
+      - source: CO
+        mode: molecule
+        count: 2
+        height: 2.0
+    solvent_density: 1.0
+    solvent_smiles: O
+
+  exploration:
+    method: md
+    model_name: emt
+    temperature: 300.0
+    steps: 100
+    timestep: 0.5
+
+  sampling:
+    strategy: fps
+    n_samples: 10
+    descriptor_type: soap
+    min_distance: 1.2
+
+  output_dir: output_surface_demo
+  seed: 123
