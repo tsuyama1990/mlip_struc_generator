@@ -1,86 +1,91 @@
-import pytest
 import os
-import numpy as np
+import pytest
+import shutil
 from ase import Atoms
-from pydantic import ValidationError
+from nnp_gen.core.storage import ASEDbStorage
 from nnp_gen.core.models import StructureMetadata
-from nnp_gen.core.storage import DatabaseManager
+from nnp_gen.core.exceptions import PipelineError
 
 @pytest.fixture
-def db_manager(tmp_path):
-    # Use temporary file
-    db_file = tmp_path / "test.db"
-    return DatabaseManager(str(db_file))
+def storage_path(tmp_path):
+    return str(tmp_path / "test_storage.db")
 
-def test_schema_validation():
-    # Valid
-    meta = StructureMetadata(source="seed", config_hash="abc")
-    assert meta.source == "seed"
+def test_storage_save_and_load(storage_path):
+    storage = ASEDbStorage(storage_path)
+    atoms = Atoms('H2O', positions=[[0, 0, 0], [0, 0, 1], [0, 1, 0]])
+    atoms.info['descriptor'] = {'data': [1, 2, 3]} # Mock descriptor
 
-    # Invalid source
-    with pytest.raises(ValidationError):
-        StructureMetadata(source="invalid_source", config_hash="abc")
-
-    # Missing required
-    with pytest.raises(ValidationError):
-        StructureMetadata(source="seed") # missing config_hash
-
-def test_round_trip(db_manager):
-    atoms = Atoms('H2', positions=[[0,0,0], [0.74,0,0]])
-    # Add descriptor
-    desc = np.random.rand(100)
-    atoms.info['descriptor'] = desc
-
-    meta = StructureMetadata(source="md", config_hash="hash_123", energy=-1.5)
+    meta = StructureMetadata(source="seed", config_hash="test_hash")
 
     # Save
-    id = db_manager.save_atoms(atoms, meta)
+    id = storage.save_atoms(atoms, meta)
     assert id == 1
 
-    # Check descriptor was restored in atoms object
-    assert 'descriptor' in atoms.info
-    assert np.allclose(atoms.info['descriptor'], desc)
+    # Load via iterator
+    loaded_atoms = list(storage.get_sampled_structures())
+    # Should be empty because is_sampled defaults to False in metadata and get_sampled_structures filters by is_sampled=True
+    assert len(loaded_atoms) == 0
 
-    # Load back via direct DB access to verify storage
-    row = db_manager.db.get(id=id)
-    assert row.source == "md"
-    assert row.energy == -1.5
-    # Check descriptor in data blob
-    assert hasattr(row, 'data')
-    assert 'descriptor' in row.data
-    assert np.allclose(row.data['descriptor'], desc)
+    # Update status
+    storage.update_sampling_status([id], method="random")
 
-def test_query_filtering(db_manager):
-    atoms1 = Atoms('H')
-    meta1 = StructureMetadata(source="seed", config_hash="hash_1")
-    id1 = db_manager.save_atoms(atoms1, meta1)
+    loaded_atoms = list(storage.get_sampled_structures())
+    assert len(loaded_atoms) == 1
+    assert loaded_atoms[0].get_chemical_formula() == "H2O"
+    assert loaded_atoms[0].info['descriptor'] == {'data': [1, 2, 3]}
 
-    atoms2 = Atoms('He')
-    meta2 = StructureMetadata(source="seed", config_hash="hash_2")
-    id2 = db_manager.save_atoms(atoms2, meta2)
+def test_checkpoint_resilience(storage_path):
+    """
+    Test creating a checkpoint DB, 'crashing' (creating a new instance), and verifying data persists.
+    """
+    storage1 = ASEDbStorage(storage_path)
+    structures = [Atoms('H2', positions=[[0,0,0], [0,0,d]]) for d in range(1, 11)]
 
-    # Update 2 as sampled
-    db_manager.update_sampling_status([id2], method="fps")
+    # Bulk save with dict metadata (checkpoint style)
+    meta_list = [{"source": "seed", "config_hash": "hash", "stage": "generated"} for _ in range(10)]
+    storage1.bulk_save(structures, meta_list)
 
-    # Query using manager
-    sampled = list(db_manager.get_sampled_structures())
-    assert len(sampled) == 1
-    assert str(sampled[0].symbols) == 'He'
+    del storage1 # Simulate closure
 
-    # Verify metadata update
-    row2 = db_manager.db.get(id=id2)
-    assert row2.is_sampled is True
-    assert row2.sampling_method == "fps"
+    # New instance
+    storage2 = ASEDbStorage(storage_path)
 
-    # Verify descriptor retrieval logic works in get_sampled_structures (even if None here)
-    assert 'descriptor' not in sampled[0].info
+    # Verify we can read them back.
+    # ASEDbStorage doesn't have a generic "read all" method in IStorage interface,
+    # but we can use the underlying db object for testing.
+    rows = list(storage2.db.select())
+    assert len(rows) == 10
+    assert rows[0].stage == "generated"
 
-def test_bulk_save(db_manager):
+def test_bulk_save_transaction(storage_path):
+    storage = ASEDbStorage(storage_path)
     atoms_list = [Atoms('H'), Atoms('He')]
-    meta_list = [
-        StructureMetadata(source="seed", config_hash="hash_1"),
-        StructureMetadata(source="seed", config_hash="hash_2")
-    ]
-    ids = db_manager.bulk_save(atoms_list, meta_list)
-    assert len(ids) == 2
-    assert db_manager.db.count() == 2
+    # Second metadata is invalid (missing required fields for StructureMetadata if we used it,
+    # but here we use loose dicts. Let's force an error by passing something non-iterable where expected or causing DB error)
+
+    # To force a DB error in sqlite is hard with simple writes.
+    # Let's mock self.db.write to raise an exception on the second item.
+
+    original_write = storage.db.write
+
+    def mock_write(atoms, **kwargs):
+        if atoms.get_chemical_formula() == "He":
+            raise RuntimeError("DB Crash")
+        return original_write(atoms, **kwargs)
+
+    storage.db.write = mock_write
+
+    meta_list = [{"source": "seed"}, {"source": "seed"}]
+
+    try:
+        storage.bulk_save(atoms_list, meta_list)
+    except RuntimeError:
+        pass
+
+    # Verify rollback: count should be 0
+    # Note: ASE's sqlite `with db:` handles transaction.
+    # If using standard sqlite3 connection it works. ase.db.core.Database doesn't always expose transaction context
+    # the same way unless backend supports it. ASE SQLite does.
+
+    rows = list(storage.db.select())
+    assert len(rows) == 0
