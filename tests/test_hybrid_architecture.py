@@ -11,7 +11,8 @@ from nnp_gen.core.config import (
     UserFileSystemConfig
 )
 from nnp_gen.core.physics import detect_vacuum
-from nnp_gen.explorers.md_engine import _perform_mc_swap, _get_integrator
+from nnp_gen.explorers.md_engine import _get_integrator
+from nnp_gen.explorers.mc_moves import perform_mc_swap as _perform_mc_swap
 from ase.md.npt import NPT
 from ase.md.langevin import Langevin
 from nnp_gen.generators.file_loader import FileGenerator
@@ -167,3 +168,57 @@ def test_file_generator_vacancies(tmp_path):
     assert len(results) == 1
     # 256 atoms. 10% vacancies = 25 atoms removed. 256 - 25 = 231.
     assert len(results[0]) == 231
+
+# --- 5. Pydantic Verification Tests ---
+
+def test_user_file_validation_failure():
+    with pytest.raises(ValidationError) as excinfo:
+        UserFileSystemConfig(
+            elements=["Cu"],
+            path="dummy.cif",
+            repeat=0 # Invalid, must be >= 1
+        )
+    assert "repeat" in str(excinfo.value)
+
+    with pytest.raises(ValidationError) as excinfo:
+         UserFileSystemConfig(
+            elements=["Cu"],
+            path="dummy.cif",
+            vacancy_concentration=0.5 # Invalid, > 0.25
+        )
+    assert "vacancy_concentration" in str(excinfo.value)
+
+def test_exploration_validation_failure():
+    with pytest.raises(ValidationError) as excinfo:
+        ExplorationConfig(
+            timestep=0.05 # Invalid, <= 0.1
+        )
+    assert "timestep" in str(excinfo.value)
+
+    with pytest.raises(ValidationError) as excinfo:
+        ExplorationConfig(
+            steps=0 # Invalid
+        )
+    assert "steps" in str(excinfo.value)
+
+from nnp_gen.core.config import AppConfig, SamplingConfig
+
+def test_app_config_integration():
+    # Construct a full valid config to ensure integration
+    app_config = AppConfig(
+        system=IonicSystemConfig(
+            elements=["Na", "Cl"],
+            oxidation_states={"Na": 1, "Cl": -1},
+            vacancy_concentration=0.1
+        ),
+        exploration=ExplorationConfig(
+            method="hybrid_mc_md",
+            ensemble=EnsembleType.AUTO,
+            mc_config=MonteCarloConfig(enabled=True)
+        ),
+        sampling=SamplingConfig(),
+        output_dir="test_out",
+        seed=123
+    )
+    assert app_config.system.vacancy_concentration == 0.1
+    assert app_config.exploration.mc_config.enabled is True

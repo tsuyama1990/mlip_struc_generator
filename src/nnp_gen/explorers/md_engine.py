@@ -14,6 +14,7 @@ from tqdm import tqdm
 from nnp_gen.core.interfaces import IExplorer
 from nnp_gen.core.config import ExplorationConfig, MonteCarloConfig, EnsembleType, MCStrategy
 from nnp_gen.core.physics import detect_vacuum
+from nnp_gen.explorers.mc_moves import perform_mc_swap
 import psutil
 import multiprocessing
 import queue
@@ -138,160 +139,6 @@ def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: 
         friction = 0.002
         return Langevin(atoms, timestep=timestep, temperature_K=current_temp, friction=friction)
 
-def _perform_mc_swap(atoms: Atoms, mc_config: MonteCarloConfig, temp: float, calc) -> bool:
-    """
-    Perform a Monte Carlo swap or vacancy hop.
-    Returns True if accepted, False otherwise.
-    """
-    if not mc_config.enabled:
-        return False
-
-    if temp <= 0:
-        return False
-
-    # Choose Strategy
-    strategy = random.choice(mc_config.strategy)
-
-    # Calculate initial energy
-    try:
-        e_old = atoms.get_potential_energy()
-    except Exception as e:
-        logger.warning(f"MC Energy calculation failed: {e}")
-        return False
-
-    accepted = False
-
-    # Save original positions/symbols to revert if rejected
-    # Deep copy is expensive? atoms.copy() is safer.
-    # But for just swapping 2 atoms, we can revert manually.
-    # For large displacement, manual revert is also easy.
-
-    indices_changed = []
-    original_positions = []
-    original_symbols = []
-
-    # --- STRATEGY A: VACANCY HOP (Smart Rattle) ---
-    if strategy == MCStrategy.VACANCY_HOP:
-        # Pick random atom
-        idx = random.randint(0, len(atoms) - 1)
-
-        # Large displacement (2.5 A) in random direction
-        # Why 2.5? Typical interatomic distance. Jumping to a neighbor site (void).
-        disp_mag = 2.5
-        direction = np.random.normal(size=3)
-        norm = np.linalg.norm(direction)
-        if norm < 1e-6:
-            return False # Fail safe
-        direction /= norm
-        displacement = direction * disp_mag
-
-        # Store old state
-        indices_changed = [idx]
-        original_positions = [atoms.positions[idx].copy()]
-
-        # Apply move
-        atoms.positions[idx] += displacement
-
-    # --- STRATEGY B: SWAP ---
-    elif strategy == MCStrategy.SWAP:
-        if not mc_config.swap_pairs:
-            return False
-
-        # Pick a pair type
-        pair_type = random.choice(mc_config.swap_pairs)
-        el1, el2 = pair_type
-
-        # Find indices
-        indices1 = [i for i, s in enumerate(atoms.get_chemical_symbols()) if s == el1]
-        indices2 = [i for i, s in enumerate(atoms.get_chemical_symbols()) if s == el2]
-
-        if not indices1 or not indices2:
-            return False # Cannot swap
-
-        idx1 = random.choice(indices1)
-        idx2 = random.choice(indices2)
-
-        if idx1 == idx2:
-            return False
-
-        # Safety Check: Charge
-        if atoms.has("initial_charges"):
-            charges = atoms.get_initial_charges()
-            q1 = charges[idx1]
-            q2 = charges[idx2]
-
-            if abs(q1 - q2) > 0.1 and not mc_config.allow_charge_mismatch:
-                logger.warning(f"Aliovalent swap rejected: {el1}({q1}) <-> {el2}({q2})")
-                return False
-
-        # Apply Swap (positions or symbols? Swapping positions is physically equivalent to swapping identity)
-        # Swapping identity (symbols/numbers) preserves geometry, checks if species fits better there.
-        # Usually MC swap means swapping species.
-
-        indices_changed = [idx1, idx2]
-        original_symbols = [atoms.symbols[idx1], atoms.symbols[idx2]]
-
-        # Swap symbols
-        atoms.symbols[idx1], atoms.symbols[idx2] = atoms.symbols[idx2], atoms.symbols[idx1]
-        # Also swap charges/magmoms if they exist?
-        # If we swap species, we imply the atom at position X changes identity.
-        # So its inherent properties (charge) should follow the species?
-        # Or does the ion move?
-        # If we swap Na+ and K+, the position at X becomes K+ (with K charge).
-        # So we should swap the aux arrays too.
-
-        if atoms.has("initial_charges"):
-            q = atoms.get_initial_charges()
-            q[idx1], q[idx2] = q[idx2], q[idx1]
-            atoms.set_initial_charges(q)
-
-        if atoms.has("initial_magmoms"):
-            m = atoms.get_initial_magnetic_moments()
-            m[idx1], m[idx2] = m[idx2], m[idx1]
-            atoms.set_initial_magnetic_moments(m)
-
-    # --- METROPOLIS ---
-    try:
-        e_new = atoms.get_potential_energy()
-        delta_e = e_new - e_old
-
-        if delta_e < 0:
-            accepted = True
-        else:
-            # Boltzmann
-            k_b = units.kB # eV/K
-            prob = np.exp(-delta_e / (k_b * temp))
-            if random.random() < prob:
-                accepted = True
-
-    except Exception as e:
-        logger.warning(f"MC New Energy calculation failed: {e}")
-        accepted = False
-
-    if accepted:
-        logger.info(f"MC {strategy} Accepted. dE = {delta_e:.4f} eV")
-        return True
-    else:
-        # Revert
-        if strategy == MCStrategy.VACANCY_HOP:
-            atoms.positions[indices_changed[0]] = original_positions[0]
-        elif strategy == MCStrategy.SWAP:
-            # Revert symbols
-            atoms.symbols[indices_changed[0]] = original_symbols[0]
-            atoms.symbols[indices_changed[1]] = original_symbols[1]
-            # Revert arrays
-            if atoms.has("initial_charges"):
-                q = atoms.get_initial_charges()
-                # Swap back
-                q[indices_changed[0]], q[indices_changed[1]] = q[indices_changed[1]], q[indices_changed[0]]
-                atoms.set_initial_charges(q)
-            if atoms.has("initial_magmoms"):
-                m = atoms.get_initial_magnetic_moments()
-                m[indices_changed[0]], m[indices_changed[1]] = m[indices_changed[1]], m[indices_changed[0]]
-                atoms.set_initial_magnetic_moments(m)
-
-        return False
-
 def run_single_md_thread(
     atoms: Atoms,
     expl_config: ExplorationConfig,
@@ -365,18 +212,6 @@ def run_single_md_thread(
 
             while total_steps_done < steps:
                 # Determine chunk size
-                # We need to stop for MC swap OR for snapshot?
-                # Actually, standard MD runs for X steps then snapshot.
-                # If MC is enabled, we need to stop every `swap_interval`.
-
-                # Smallest unit of work before we need to do *something* (Swap or Snap)
-                # But dyn.run(1) is slow.
-                # Let's run in chunks of min(swap_interval, remaining)
-
-                # Handling snapshots:
-                # Ideally we check snapshot logic every step, but for perf we want chunks.
-                # We can snapshot after the chunk.
-
                 chunk = min(swap_interval, steps - total_steps_done)
                 if chunk < 1:
                     break
@@ -394,15 +229,7 @@ def run_single_md_thread(
                 step_check()
                 
                 # Snapshot Logic
-                # If we crossed a multiple of snap_interval?
-                # Approx: just snapshot at end of chunk if enough time passed?
-                # Let's stick to strict interval logic:
-                # if total_steps_done % snap_interval == 0 (or close)
-                # Just appending at chunk end is fine if chunk size aligns.
-                # To be robust:
                 if total_steps_done % snap_interval < chunk:
-                     # e.g. interval 20, chunk 100.
-                     # 0->100. %20==0.
                      snap = atoms.copy()
                      snap.calc = None
                      trajectory.append(snap)
@@ -410,16 +237,8 @@ def run_single_md_thread(
                 # MC Logic
                 if mc_config and mc_config.enabled:
                     # Trigger swap
-                    # Use current temp for MC acceptance
                     mc_temp = mc_config.temp if mc_config.temp else current_t
-                    _perform_mc_swap(atoms, mc_config, mc_temp, calc)
-                    # Note: _perform_mc_swap updates atoms in-place.
-                    # Dynamics object 'dyn' holds reference to 'atoms'.
-                    # Does Langevin need reset if positions changed drastically?
-                    # Velocities are kept. Forces will be recalculated next step automatically by ASE.
-                    # However, if Vacuum Hop moves atom far, high potential energy -> high force -> acceleration.
-                    # This is physical (hot spot). Maybe we should thermalize velocities of moved atom?
-                    # For now, standard MC/MD hybrid just proceeds.
+                    perform_mc_swap(atoms, mc_config, mc_temp, calc)
 
                 if steps >= 10 and total_steps_done % max(1, steps // 10) < chunk:
                      logger.info(f"MD Progress: {total_steps_done}/{steps}")
