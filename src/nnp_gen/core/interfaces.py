@@ -24,8 +24,9 @@ class BaseGenerator(ABC):
     Abstract Base Class for structure generators with built-in validation.
     """
 
-    def __init__(self, config: SystemConfig):
+    def __init__(self, config: SystemConfig, seed: Optional[int] = 42):
         self.config = config
+        self.seed = seed
         self.validator = StructureValidator(config.constraints)
 
     def generate(self) -> List[Atoms]:
@@ -65,7 +66,9 @@ class BaseGenerator(ABC):
             # tobytes() is safe.
 
             # Mix components
-            mix_str = f"{self.config.system_seed if hasattr(self.config, 'system_seed') else ''}_{atoms.get_chemical_formula()}_{i}"
+            # Use self.seed if provided, else fallback or system_seed
+            base_seed = self.seed if self.seed is not None else 0
+            mix_str = f"{base_seed}_{atoms.get_chemical_formula()}_{i}"
 
             hasher = hashlib.sha256()
             hasher.update(mix_str.encode('utf-8'))
