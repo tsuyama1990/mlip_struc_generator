@@ -12,11 +12,13 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase import units
 from ase.data import covalent_radii
 from tqdm import tqdm
+import tempfile
 from nnp_gen.core.interfaces import IExplorer
 from nnp_gen.core.config import ExplorationConfig, MonteCarloConfig, EnsembleType, MCStrategy
 from nnp_gen.core.physics import detect_vacuum
 from nnp_gen.explorers.mc_moves import perform_mc_swap
 from nnp_gen.core.exceptions import PhysicsViolationError, TimeoutError
+from nnp_gen.core.calculators import CalculatorFactory
 import psutil
 import multiprocessing
 
@@ -40,30 +42,7 @@ def _get_calculator(model_name: str, device: str):
     except ImportError:
         pass
 
-    if model_name == "mace":
-        try:
-            from mace.calculators import mace_mp
-            return mace_mp(model="small", device=device, default_dtype="float32")
-        except ImportError:
-             logger.warning("mace_mp not found in mace.calculators. Falling back to MACECalculator with direct path check.")
-             from mace.calculators import MACECalculator
-             return MACECalculator(model_paths="small", device=device, default_dtype="float32")
-        except Exception as e:
-             raise ImportError(f"Error loading MACE model: {e}")
-
-    elif model_name == "sevenn":
-        try:
-            from sevenn.calculators import SevenNetCalculator
-            return SevenNetCalculator(model="7net-0", device=device)
-        except ImportError:
-             raise ImportError("sevenn not found")
-
-    elif model_name == "emt":
-        from ase.calculators.emt import EMT
-        return EMT()
-
-    else:
-        raise ImportError(f"Unknown model: {model_name}")
+    return CalculatorFactory.get(model_name, device)
 
 def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: float):
     """
@@ -93,7 +72,9 @@ def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: 
     if use_npt:
         pressure = expl_config.pressure if expl_config.pressure is not None else 0.0
         p_internal = pressure * units.GPa
-        ttime = 25 * units.fs
+        # Use configured ttime or safe default
+        ttime_val = expl_config.ttime if hasattr(expl_config, 'ttime') else 100.0
+        ttime = ttime_val * units.fs
         pfactor = 75**2 * units.fs**2 # Default-ish
 
         return NPT(atoms, timestep=timestep, temperature_K=current_temp, externalstress=p_internal, ttime=ttime, pfactor=pfactor)
@@ -218,15 +199,11 @@ def run_single_md_process(
         # Catch all exceptions to dump debug structure locally
         # Since we are in a worker, we should write to a file that won't collide.
         try:
-             # Just dump to CWD/debug or tmp?
-             # We don't have access to configured debug_dir easily unless passed.
-             # We'll try to dump to "debug/" in CWD.
-             debug_dir = "debug"
-             if not os.path.exists(debug_dir):
-                 os.makedirs(debug_dir, exist_ok=True)
+             # Dump to tempdir to prevent pollution
+             debug_dir = tempfile.gettempdir()
 
              pid = os.getpid()
-             filename = os.path.join(debug_dir, f"worker_{pid}_failed.xyz")
+             filename = os.path.join(debug_dir, f"nnp_gen_worker_{pid}_failed.xyz")
              atoms.info['error'] = str(e)
              from ase.io import write
              write(filename, atoms)

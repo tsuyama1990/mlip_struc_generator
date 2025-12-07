@@ -64,6 +64,7 @@ class BaseSystemConfig(BaseModel):
     pbc: List[bool] = Field([True, True, True], description="Periodic Boundary Conditions")
     rattle_std: float = Field(0.01, description="Standard deviation for Gaussian rattle in Angstrom")
     vol_scale_range: List[float] = Field([0.95, 1.05], min_length=2, max_length=2, description="Min/Max scaling factors for volume augmentation")
+    strict_mode: bool = Field(True, description="Enforce strict dependency and physics checks")
 
     @field_validator('elements')
     @classmethod
@@ -318,6 +319,7 @@ class ExplorationConfig(BaseModel):
     temp_end: Optional[float] = Field(None, description="End temperature for gradient mode")
     
     pressure: Optional[float] = Field(None, description="Pressure in GPa (None for NVT)")
+    ttime: float = Field(100.0, description="Thermostat time constant for NPT in fs")
     steps: int = Field(1000, description="Number of steps per exploration run")
     timestep: float = Field(1.0, description="Timestep in fs")
 

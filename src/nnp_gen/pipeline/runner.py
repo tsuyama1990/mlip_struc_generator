@@ -61,7 +61,7 @@ class PipelineRunner:
             self.storage = ASEDbStorage(db_path)
 
         # Dependency Injection with Defaults
-        self.generator = generator or GeneratorFactory.get_generator(self.config.system)
+        self.generator = generator or GeneratorFactory.get_generator(self.config.system, seed=self.config.seed)
 
         if explorer:
             self.explorer = explorer

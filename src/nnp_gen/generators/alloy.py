@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from typing import List
+from typing import List, Optional
 from ase import Atoms
 from ase.build import bulk
 from nnp_gen.core.interfaces import BaseGenerator
@@ -10,8 +10,8 @@ from nnp_gen.core.physics import estimate_lattice_constant, apply_vacancies
 logger = logging.getLogger(__name__)
 
 class AlloyGenerator(BaseGenerator):
-    def __init__(self, config: AlloySystemConfig):
-        super().__init__(config)
+    def __init__(self, config: AlloySystemConfig, seed: Optional[int] = None):
+        super().__init__(config, seed=seed)
         self.config = config
 
     def _generate_impl(self) -> List[Atoms]:
@@ -60,7 +60,11 @@ class AlloyGenerator(BaseGenerator):
         n_atoms = len(atoms)
         elements = self.config.elements
 
-        rng = np.random.RandomState(42)
+        # Use passed seed + some salt for structure specific randomness if needed
+        # Since this generator makes 1 structure, using self.seed is fine
+        seed_val = self.seed if self.seed is not None else 42
+        rng = np.random.RandomState(seed_val)
+
         symbols = rng.choice(elements, size=n_atoms)
         atoms.set_chemical_symbols(symbols)
 

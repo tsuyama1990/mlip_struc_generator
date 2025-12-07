@@ -2,6 +2,10 @@ import numpy as np
 from typing import Dict, Tuple, List, Optional
 from ase import Atoms
 from math import ceil
+from scipy.spatial import KDTree
+from scipy.ndimage import label
+from ase.data import covalent_radii
+from nnp_gen.core.exceptions import GenerationError
 
 def apply_rattle(atoms: Atoms, std: float, seed: Optional[int] = None) -> Atoms:
     """
@@ -229,7 +233,7 @@ def estimate_lattice_constant(elements: List[str], structure: str = "fcc") -> fl
         lattice_constants.append(a_target)
 
     if not lattice_constants:
-        return 3.6 # Generic fallback
+        raise GenerationError(f"Unable to estimate lattice constant for elements: {elements}")
         
     return float(np.mean(lattice_constants))
 
@@ -237,66 +241,70 @@ def detect_vacuum(atoms: Atoms, threshold: float = 5.0) -> bool:
     """
     Detect if the system has vacuum (is a slab, wire, or cluster) or is fully bulk.
 
-    Logic:
-    1. If any PBC is False -> Vacuum (Slab/Wire/Cluster).
-    2. If all PBC are True -> Check for gaps in atomic distribution along axes.
-       Projects positions onto each axis and checks for empty space > threshold.
-
-    Args:
-        atoms (Atoms): Structure to check.
-        threshold (float): Minimum gap size in Angstroms to consider as vacuum.
-
-    Returns:
-        bool: True if vacuum is detected.
+    Uses Grid-Based Void Detection:
+    1. Grid spacing ~1.0 A.
+    2. Mark points as occupied if within covalent_radius + 0.5 of any atom.
+    3. Use connected components to find largest empty void.
+    4. If span of void > threshold, it's Vacuum.
     """
     if any(not p for p in atoms.pbc):
         return True
 
-    # Histogram check for bulk vacuum (e.g. a slab manually created inside a periodic box)
-    # We check each dimension by looking at gaps in sorted coordinates.
-
-    positions = atoms.get_positions()
+    # Setup Grid
     cell = atoms.get_cell()
+    # Check if cell is orthogonal enough?
+    # For general cells, we should work in fractional coordinates or transform grid points.
+    # Simpler: Create grid in scaled coordinates [0, 1].
 
-    for i in range(3):
-        L = np.linalg.norm(cell[i])
+    grid_spacing = 1.0 # Angstrom
+    lengths = atoms.cell.lengths()
 
-        # If cell dimension is smaller than threshold, it can't contain a vacuum of that size
-        if L < threshold:
-            continue
+    # Grid dimensions
+    ngrid = np.ceil(lengths / grid_spacing).astype(int)
+    ngrid = np.maximum(ngrid, 1) # Safety for degenerate cells
 
-        coords = positions[:, i]
-        # Sort coordinates
-        coords_sorted = np.sort(coords)
+    # Generate grid points in scaled coords
+    x = np.linspace(0, 1, ngrid[0], endpoint=False)
+    y = np.linspace(0, 1, ngrid[1], endpoint=False)
+    z = np.linspace(0, 1, ngrid[2], endpoint=False)
 
-        # Calculate gaps
-        gaps = np.diff(coords_sorted)
-        max_internal_gap = np.max(gaps) if len(gaps) > 0 else 0
+    # Meshgrid (Cartesian)
+    xv, yv, zv = np.meshgrid(x, y, z, indexing='ij')
+    scaled_points = np.stack([xv.flatten(), yv.flatten(), zv.flatten()], axis=1)
 
-        # Check periodic gap (wrap around)
-        # Gap between last atom and first atom across boundary
-        # Note: positions are not wrapped, so last - first could be large if atoms are spread out,
-        # but we care about the empty space in the periodic box.
-        # Ideally, we map to [0, L] first.
-        # But even simpler: L - (max - min) roughly if one cluster? No.
+    # Convert to Cartesian
+    grid_points = atoms.cell.cartesian_positions(scaled_points)
 
-        # Correct Periodic Gap: (L - coords_sorted[-1]) + coords_sorted[0]
-        # This assumes coords are in [0, L]. If they are outside, we should wrap them first.
-        # But wrapping might split a molecule.
+    # Build Tree for Atoms
+    positions = atoms.get_positions()
+    tree = KDTree(positions, boxsize=lengths) # boxsize handles PBC for KDTree query
 
-        # Let's rely on standard ASE wrap to be safe
-        # Create a copy to not modify original
-        temp_atoms = atoms.copy()
-        temp_atoms.wrap()
-        wrapped_coords = np.sort(temp_atoms.positions[:, i])
+    # Determine occupancy
+    # We use a uniform radius for simplicity or max covalent radius in system
+    # For a robust "void" check, we want to know if a probe fits.
+    # Probe radius ~1.0A usually.
+    # Occupied if dist < (r_atom + r_probe).
+    # Let's simply check distance to nearest atom.
 
-        wrapped_gaps = np.diff(wrapped_coords)
-        max_wrapped_gap = np.max(wrapped_gaps) if len(wrapped_gaps) > 0 else 0
+    # Get max covalent radius in system to set a safe upper bound query
+    max_cov = max([covalent_radii[n] for n in set(atoms.numbers)])
+    probe_r = 1.0
+    cutoff = max_cov + probe_r
 
-        periodic_gap = (L - wrapped_coords[-1]) + wrapped_coords[0]
+    # Query tree
+    # KDTree query returns distance to nearest neighbor
+    dists, _ = tree.query(grid_points, k=1)
 
-        if max(max_wrapped_gap, periodic_gap) > threshold:
-            return True
+    # Identify voids
+    # Use "Largest Empty Sphere" approximation.
+    # We simply look for the point in the grid that is furthest from any atom.
+    # If max(min_dist) > threshold / 2, then there is a void of diameter > threshold.
+
+    max_void_radius = np.max(dists)
+
+    # Threshold is interpreted as a diameter (gap size).
+    if max_void_radius > (threshold / 2.0):
+        return True
 
     return False
 

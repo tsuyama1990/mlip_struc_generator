@@ -11,6 +11,18 @@ from nnp_gen.core.exceptions import GenerationError
 
 logger = logging.getLogger(__name__)
 
+DefaultOxidationStates = {
+    'Li': +1, 'Na': +1, 'K': +1, 'Rb': +1, 'Cs': +1,
+    'Be': +2, 'Mg': +2, 'Ca': +2, 'Sr': +2, 'Ba': +2,
+    'F': -1, 'Cl': -1, 'Br': -1, 'I': -1,
+    'O': -2, 'S': -2, 'Se': -2, 'Te': -2,
+    'N': -3, 'P': -3,
+    'Al': +3, 'Ga': +3, 'In': +3,
+    'Zn': +2, 'Cd': +2,
+    'Ag': +1,
+    'Sc': +3, 'Y': +3, 'La': +3
+}
+
 def validate_element(el: str) -> str:
     """
     Validates and sanitizes an element symbol.
@@ -28,8 +40,8 @@ def validate_element(el: str) -> str:
     return el_clean
 
 class IonicGenerator(BaseGenerator):
-    def __init__(self, config: IonicSystemConfig):
-        super().__init__(config)
+    def __init__(self, config: IonicSystemConfig, seed: Optional[int] = None):
+        super().__init__(config, seed=seed)
         self.config = config
 
         # Validate elements
@@ -54,6 +66,9 @@ class IonicGenerator(BaseGenerator):
             self.Element = Element
             self.has_pmg = True
         except ImportError:
+            if getattr(self.config, 'strict_mode', True):
+                raise ImportError("Pymatgen required for accurate Ionic Generation. Install it or disable strict_mode.")
+
             self.has_pmg = False
             self.pmg = None
             self.Lattice = None
@@ -68,10 +83,15 @@ class IonicGenerator(BaseGenerator):
         """
         logger.info(f"Generating ionic structures for {self.config.elements}")
 
+        # Smart Oxidation State Inference
         for el in self.config.elements:
             if el not in self.config.oxidation_states:
-                logger.error(f"Oxidation state for {el} not defined.")
-                raise GenerationError(f"Oxidation state for {el} missing")
+                if el in DefaultOxidationStates:
+                    logger.info(f"Using default oxidation state for {el}: {DefaultOxidationStates[el]}")
+                    self.config.oxidation_states[el] = DefaultOxidationStates[el]
+                else:
+                    logger.error(f"Oxidation state for {el} is ambiguous. Please specify in config.")
+                    raise GenerationError(f"Oxidation state for {el} missing and no default available.")
 
         structures = []
 
@@ -85,7 +105,8 @@ class IonicGenerator(BaseGenerator):
              raise GenerationError("No structures could be generated with the current configuration.")
 
         # Apply Post-Processing: Vacancies and Charges
-        rng = np.random.RandomState(42) # Should use structured seed if possible, but consistent 42 for now in impl
+        seed_val = self.seed if self.seed is not None else 42
+        rng = np.random.RandomState(seed_val)
 
         final_structures = []
         for atoms in structures:
@@ -157,7 +178,7 @@ class IonicGenerator(BaseGenerator):
             return r_atomic
 
         # 2c. Ultimate fallback
-        return 1.5
+        raise GenerationError(f"Could not determine radius for species {species_str}")
 
     def _generate_with_pymatgen(self) -> List[Atoms]:
         """
