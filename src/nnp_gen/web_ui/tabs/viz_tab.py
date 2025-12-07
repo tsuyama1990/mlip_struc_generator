@@ -243,12 +243,13 @@ class VizTab:
 
         self.vm.pca_source.selected.on_change("indices", on_selection_change)
 
-        try:
-            pn.state.add_periodic_callback(self.vm.update_job_list, period=2000)
-        except RuntimeError:
-             pass
+        self.vm.pca_source.selected.on_change("indices", on_selection_change)
 
     def view(self):
+        # Register periodic callback when the view is loaded into the server
+        if pn.state.curdoc:
+             pn.state.onload(lambda: pn.state.add_periodic_callback(self.vm.update_job_list, period=2000))
+
         # File Input for external load
         file_input = pn.widgets.FileInput(accept=".db")
 

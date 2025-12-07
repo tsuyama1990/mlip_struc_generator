@@ -201,7 +201,13 @@ SystemConfig = Union[
 class ExplorationConfig(BaseModel):
     method: Literal["md", "mc", "hybrid_mc_md", "melt_quench", "normal_mode"] = Field("md", description="Exploration method")
     model_name: Literal["mace", "sevenn", "emt"] = Field("mace", description="Calculator model name")
-    temperature: float = Field(300.0, description="Temperature in Kelvin")
+    
+    # Temperature Settings
+    temperature_mode: Literal["constant", "gradient"] = Field("constant", description="Temperature control mode")
+    temperature: float = Field(300.0, description="Temperature in Kelvin (Constant mode)")
+    temp_start: Optional[float] = Field(None, description="Start temperature for gradient mode")
+    temp_end: Optional[float] = Field(None, description="End temperature for gradient mode")
+    
     pressure: Optional[float] = Field(None, description="Pressure in GPa (None for NVT)")
     steps: int = Field(1000, description="Number of steps per exploration run")
     timestep: float = Field(1.0, description="Timestep in fs")
@@ -214,6 +220,15 @@ class ExplorationConfig(BaseModel):
         if v >= 10000:
             raise ValueError("Temperature must be less than 10000 K")
         return v
+    
+    @model_validator(mode='after')
+    def validate_temperature_settings(self) -> 'ExplorationConfig':
+        if self.temperature_mode == "gradient":
+            if self.temp_start is None or self.temp_end is None:
+                raise ValueError("temp_start and temp_end must be provided for gradient mode")
+            if self.temp_start <= 0 or self.temp_end <= 0:
+                raise ValueError("Temperatures must be positive")
+        return self
 
     @field_validator('steps')
     @classmethod
