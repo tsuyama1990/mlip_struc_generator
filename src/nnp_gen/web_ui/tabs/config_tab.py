@@ -12,6 +12,7 @@ from nnp_gen.core.config import (
 from nnp_gen.web_ui.job_manager import JobManager
 from nnp_gen.generators.ionic import validate_element
 from ase.data import chemical_symbols
+from nnp_gen.core.physics import estimate_lattice_constant
 
 class ConfigViewModel(param.Parameterized):
     # --- System Type Selector ---
@@ -35,7 +36,11 @@ class ConfigViewModel(param.Parameterized):
     min_distance = param.Number(default=1.5, bounds=(0.1, 10.0))
 
     # --- Exploration ---
-    temperature = param.Number(default=300.0, bounds=(0.1, 10000.0))
+    temperature_mode = param.Selector(objects=["constant", "gradient"], default="constant")
+    temperature = param.Number(default=300.0, bounds=(0.1, 10000.0), doc="Temperature (Constant)")
+    temp_start = param.Number(default=300.0, bounds=(0.1, 10000.0), doc="Start Temp (Gradient)")
+    temp_end = param.Number(default=1000.0, bounds=(0.1, 10000.0), doc="End Temp (Gradient)")
+    timestep = param.Number(default=1.0, bounds=(0.1, 10.0), doc="Time step (fs)")
     steps = param.Integer(default=1000, bounds=(10, 1000000))
 
     # --- Actions ---
@@ -57,7 +62,11 @@ class ConfigViewModel(param.Parameterized):
         """Dynamic panel based on system type."""
         if self.system_type == "alloy":
             return pn.Column(
-                pn.Param(self.param.alloy_lattice_constant, name="Lattice Constant"),
+                pn.Param(
+                    self.param.alloy_lattice_constant, 
+                    name="Lattice Constant",
+                    widgets={'alloy_lattice_constant': pn.widgets.EditableFloatSlider}
+                ),
             )
         elif self.system_type == "molecule":
             return pn.Column(
@@ -65,6 +74,19 @@ class ConfigViewModel(param.Parameterized):
             )
         else:
             return pn.pane.Markdown(f"**{self.system_type} configuration not fully implemented in UI demo.**")
+
+    @param.depends("temperature_mode")
+    def exploration_settings_panel(self):
+        """Dynamic temperature controls."""
+        if self.temperature_mode == "constant":
+            return pn.Column(
+                pn.Param(self.param.temperature, widgets={'temperature': pn.widgets.EditableFloatSlider}, name="Temperature (K)"),
+            )
+        else:
+            return pn.Column(
+                pn.Param(self.param.temp_start, widgets={'temp_start': pn.widgets.EditableFloatSlider}, name="Start Temp (K)"),
+                pn.Param(self.param.temp_end, widgets={'temp_end': pn.widgets.EditableFloatSlider}, name="End Temp (K)"),
+            )
 
     @param.depends("elements_input", watch=True)
     def validate_elements_realtime(self):
@@ -77,12 +99,15 @@ class ConfigViewModel(param.Parameterized):
 
         elements = [e.strip() for e in self.elements_input.split(",") if e.strip()]
         invalid = []
+        valid_elements = []
         for el in elements:
             try:
                 # Basic check, or use validate_element?
                 # Using chemical_symbols check directly to allow UI responsiveness without exceptions
                 if el.capitalize() not in chemical_symbols:
                     invalid.append(el)
+                else:
+                    valid_elements.append(el)
             except Exception:
                 invalid.append(el)
 
@@ -90,6 +115,14 @@ class ConfigViewModel(param.Parameterized):
              self.status_message = f"⚠️ Invalid elements: {', '.join(invalid)}"
         else:
              self.status_message = "Ready"
+             # Auto-estimate lattice constant for Alloy
+             if self.system_type == "alloy" and valid_elements:
+                 try:
+                     est_a = estimate_lattice_constant(valid_elements, structure='fcc') # Default/Fallback structure
+                     if est_a > 0:
+                         self.alloy_lattice_constant = round(est_a, 3)
+                 except Exception:
+                     pass
 
     def get_pydantic_config(self) -> AppConfig:
         """
@@ -124,10 +157,16 @@ class ConfigViewModel(param.Parameterized):
             # Ensure elements is optional or inferred for molecule if not provided?
             # Pydantic model will handle validation.
 
-        # 2. Update Exploration Config
         expl_data = ensure_dict(config_data, "exploration")
-        expl_data["temperature"] = self.temperature
         expl_data["steps"] = self.steps
+        expl_data["timestep"] = self.timestep
+        expl_data["temperature_mode"] = self.temperature_mode
+        
+        if self.temperature_mode == "constant":
+            expl_data["temperature"] = self.temperature
+        else:
+            expl_data["temp_start"] = self.temp_start
+            expl_data["temp_end"] = self.temp_end
 
         # 3. Ensure other required sections exist if creating from scratch
         if "sampling" not in config_data:
@@ -166,8 +205,16 @@ class ConfigViewModel(param.Parameterized):
 
             if "exploration" in data:
                 expl = data["exploration"]
+                self.temperature_mode = expl.get("temperature_mode", "constant")
+                
                 if "temperature" in expl:
                     self.temperature = expl["temperature"]
+                if "temp_start" in expl:
+                    self.temp_start = expl["temp_start"]
+                if "temp_end" in expl:
+                    self.temp_end = expl["temp_end"]
+                if "timestep" in expl:
+                    self.timestep = expl["timestep"]
                 if "steps" in expl:
                     self.steps = expl["steps"]
 
@@ -206,14 +253,18 @@ class ConfigViewModel(param.Parameterized):
             # Ideally JobManager exposes status.
             status = self.job_manager.get_status(self._last_job_id)
             if status == "running":
-                 # Check logs for keywords
+                 # Check logs for keywords and update status message
                  if "Step 1: Structure Generation" in content:
+                     self.status_message = "Step 1: Structure Generation..."
                      self.progress_value = max(self.progress_value, 25)
                  if "Step 2: Exploration" in content:
+                     self.status_message = "Step 2: Exploration (MD/KMC)..."
                      self.progress_value = max(self.progress_value, 50)
                  if "Step 3: Sampling" in content:
+                     self.status_message = "Step 3: Sampling Structures..."
                      self.progress_value = max(self.progress_value, 75)
                  if "Step 4: Saving" in content:
+                     self.status_message = "Step 4: Saving Results..."
                      self.progress_value = max(self.progress_value, 90)
                  
                  # Detailed MD Progress
@@ -229,6 +280,7 @@ class ConfigViewModel(param.Parameterized):
                          # Map 0-100% MD to 50-75% overall (Step 2 to Step 3)
                          overall_perc = 50 + (perc * 25)
                          self.progress_value = max(self.progress_value, int(overall_perc))
+                         self.status_message = f"MD Progress: {current}/{total} steps"
                      except ZeroDivisionError:
                          pass
             elif status == "completed":
@@ -267,12 +319,24 @@ class ConfigTab:
         )
 
         # Periodic Callback for logs
-        log_area = pn.widgets.TextAreaInput.from_param(self.vm.param.logs, height=300, disabled=True)
+        log_area = pn.widgets.TextAreaInput.from_param(
+            self.vm.param.logs, 
+            height=300, 
+            disabled=True,
+            styles={'font-family': 'monospace'},
+            stylesheets=["""
+                textarea, textarea:disabled {
+                    color: black !important;
+                    -webkit-text-fill-color: black !important;
+                    opacity: 1 !important;
+                    background-color: #f8f9fa !important;
+                    border: 1px solid #ccc;
+                }
+            """]
+        )
 
-        try:
-            pn.state.add_periodic_callback(self.vm.update_logs, period=1000)
-        except RuntimeError:
-            pass
+        if pn.state.curdoc:
+            pn.state.onload(lambda: pn.state.add_periodic_callback(self.vm.update_logs, period=1000))
 
         return pn.Row(
             pn.Column(
@@ -282,14 +346,16 @@ class ConfigTab:
                 pn.Param(self.vm.param.elements_input),
                 self.vm.system_settings_panel,
                 "### Physics",
-                pn.Param(self.vm.param.max_atoms),
-                pn.Param(self.vm.param.min_distance),
+                pn.Param(self.vm.param.max_atoms, widgets={'max_atoms': pn.widgets.EditableIntSlider}),
+                pn.Param(self.vm.param.min_distance, widgets={'min_distance': pn.widgets.EditableFloatSlider}),
                 "### MD Exploration",
-                pn.Param(self.vm.param.temperature),
-                pn.Param(self.vm.param.steps),
+                pn.Param(self.vm.param.temperature_mode, widgets={'temperature_mode': pn.widgets.RadioButtonGroup}),
+                self.vm.exploration_settings_panel,
+                pn.Param(self.vm.param.timestep, widgets={'timestep': pn.widgets.EditableFloatSlider}),
+                pn.Param(self.vm.param.steps, widgets={'steps': pn.widgets.EditableIntSlider}),
                 run_btn,
                 progress_bar,
-                pn.Param(self.vm.param.status_message, widgets={'status_message': pn.widgets.StaticText}),
+                pn.Param(self.vm.param.status_message, widgets={'status_message': {'type': pn.widgets.StaticText, 'styles': {'color': 'black', 'font-weight': 'bold'}}}),
             ),
             pn.Column(
                 "## Logs",

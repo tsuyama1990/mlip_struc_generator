@@ -5,6 +5,7 @@ from ase import Atoms
 from ase.build import bulk
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import AlloySystemConfig
+from nnp_gen.core.physics import estimate_lattice_constant
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +21,18 @@ class AlloyGenerator(BaseGenerator):
         logger.info(f"Generating alloy structures for {self.config.elements}")
         structures = []
 
-        # Determine lattice constant and structure
-        a = self.config.lattice_constant if self.config.lattice_constant else 3.8
+        # Determine structure string for estimation
         sg = self.config.spacegroup
+        struc_type = 'fcc'
+        if sg == 229:
+            struc_type = 'bcc'
+
+        # Determine lattice constant
+        if self.config.lattice_constant:
+             a = self.config.lattice_constant
+        else:
+             a = estimate_lattice_constant(self.config.elements, structure=struc_type)
+             logger.info(f"Estimated lattice constant a={a:.3f} A")
 
         try:
             if sg == 229: # BCC

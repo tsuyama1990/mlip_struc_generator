@@ -168,3 +168,8 @@ class JobManager:
                 return f.read()
         except Exception:
             return "Error reading log file."
+
+    def get_status(self, job_id: str) -> Optional[JobStatus]:
+        with self._jobs_lock:
+            job = self.jobs.get(job_id)
+            return job.status if job else None

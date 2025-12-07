@@ -39,14 +39,15 @@ def _get_calculator(model_name: str, device: str):
 
     if model_name == "mace":
         try:
-            from mace.calculators import MACECalculator
-            return MACECalculator(model_paths=None, model_type="mace_mp_0_small", device=device, default_dtype="float32")
+            from mace.calculators import mace_mp
+            return mace_mp(model="small", device=device, default_dtype="float32")
         except ImportError:
-             raise ImportError("mace not found")
-        except Exception as e:
-             # Fallback for different signature
+             logger.warning("mace_mp not found in mace.calculators. Falling back to MACECalculator with direct path check (will likely fail if 'small' is not a file).")
              from mace.calculators import MACECalculator
-             return MACECalculator(model_paths=None, device=device)
+             return MACECalculator(model_paths="small", device=device, default_dtype="float32")
+        except Exception as e:
+             logger.error(f"Error loading MACE model: {e}")
+             raise e
 
     elif model_name == "sevenn":
         try:
@@ -94,8 +95,10 @@ class CalculatorPool:
 
 def run_single_md_thread(
     atoms: Atoms,
-    temp: float,
+    temp_start: float,
+    temp_end: float,
     steps: int,
+    timestep_fs: float,
     interval: int,
     calc_pool: CalculatorPool,
     calculator_params: Dict[str, Any],
@@ -114,12 +117,12 @@ def run_single_md_thread(
 
             atoms.calc = calc
 
-            # Initialize velocities
-            MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
+            # Initialize velocities at start temperature
+            MaxwellBoltzmannDistribution(atoms, temperature_K=temp_start)
             Stationary(atoms)
 
             # Setup Dynamics
-            dyn = Langevin(atoms, 1.0 * units.fs, temperature_K=temp, friction=0.002)
+            dyn = Langevin(atoms, timestep_fs * units.fs, temperature_K=temp_start, friction=0.002)
 
             trajectory = []
 
@@ -157,9 +160,12 @@ def run_single_md_thread(
             step_check()
 
             # Execute simulation in a loop to allow periodic timeout checks
-            # dyn.run(steps) is blocking, so we split it into smaller chunks (e.g., 1 step or small batch)
-            # For simplicity and safety, running 1 step at a time inside our loop gives max control.
             for i in range(steps):
+                # Update Temperature for Gradient Mode
+                if abs(temp_end - temp_start) > 1e-6:
+                    current_t = temp_start + (temp_end - temp_start) * (i / steps)
+                    dyn.set_temperature(temperature_K=current_t)
+
                 dyn.run(1)
                 step_check()
 
@@ -218,18 +224,27 @@ class MDExplorer(IExplorer):
         results = []
 
         # Prepare params
-        temp = self.config.exploration.temperature
-        steps = self.config.exploration.steps
+        expl = self.config.exploration
+        steps = expl.steps
+        timestep_fs = expl.timestep
         interval = max(1, steps // 50)
+        
+        # Determine Temperature Constraints
+        if expl.temperature_mode == "gradient":
+             start_t = expl.temp_start
+             end_t = expl.temp_end
+        else:
+             start_t = expl.temperature
+             end_t = expl.temperature
 
         # Determine max workers
         if n_workers is None:
             n_atoms = len(seeds[0]) if seeds else 1000
             n_workers = _calculate_max_workers(n_atoms)
 
-        logger.info(f"Starting MD Exploration with {n_workers} threads.")
+        logger.info(f"Starting MD Exploration with {n_workers} threads. Temp: {start_t}->{end_t} K, dt={timestep_fs} fs")
 
-        model_name = self.config.exploration.model_name
+        model_name = expl.model_name
         device = "cpu" # or from config
 
         # Initialize Calculator Pool
@@ -241,7 +256,7 @@ class MDExplorer(IExplorer):
             futures = []
             for seed in seeds:
                 futures.append(
-                    executor.submit(run_single_md_thread, seed, temp, steps, interval, pool, {}, 3600)
+                    executor.submit(run_single_md_thread, seed, start_t, end_t, steps, timestep_fs, interval, pool, {}, 3600)
                 )
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(seeds), desc="MD Exploration"):

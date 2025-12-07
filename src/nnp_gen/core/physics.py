@@ -164,3 +164,71 @@ def ensure_supercell_size(atoms: Atoms, r_cut: float, factor: float = 1.0) -> At
 
     supercell = atoms * repeat
     return supercell
+
+def estimate_lattice_constant(elements: List[str], structure: str = "fcc") -> float:
+    """
+    Estimates the lattice constant for an alloy using Vegard's Law (volume averaging).
+    
+    Args:
+        elements (List[str]): List of element symbols.
+        structure (str): Target crystal structure ('fcc', 'bcc', 'sc').
+    
+    Returns:
+        float: Estimated lattice constant in Angstroms.
+    """
+    from ase.data import atomic_numbers, reference_states, covalent_radii
+
+    lattice_constants = []
+    
+    for el in elements:
+        el = el.capitalize()
+        Z = atomic_numbers.get(el)
+        if Z is None:
+            continue
+            
+        ref = reference_states[Z]
+        
+        v_atom = None
+        
+        # 1. Try to get atomic volume from reference state
+        if ref is not None:
+            sym = ref.get('symmetry')
+            a_ref = ref.get('a')
+            
+            if sym and a_ref:
+                if sym == 'fcc':
+                    v_atom = (a_ref ** 3) / 4.0
+                elif sym == 'bcc':
+                    v_atom = (a_ref ** 3) / 2.0
+                elif sym == 'sc':
+                    v_atom = (a_ref ** 3)
+                elif sym == 'diamond':
+                    v_atom = (a_ref ** 3) / 8.0
+        
+        # 2. Fallback: Use Covalent Radius to estimate volume
+        if v_atom is None:
+             r = covalent_radii[Z]
+             # Estimate based on hard sphere packing roughly 74% (FCC/HCP)
+             # V_cell_fcc = (r * 2 * sqrt(2))^3 = 22.6 * r^3
+             # V_atom = V_cell / 4 = 5.65 * r^3
+             # Sphere vol = 4/3 pi r^3 = 4.18 r^3
+             # Let's approximate V_atom approx (2*r)^3 / sqrt(2) for FCC-like packing
+             v_atom = (4/3 * np.pi * (r ** 3)) / 0.74
+
+        # 3. Convert Atomic Volume to Target Lattice Constant
+        if structure == 'fcc':
+            a_target = (v_atom * 4.0) ** (1/3)
+        elif structure == 'bcc':
+            a_target = (v_atom * 2.0) ** (1/3)
+        elif structure == 'sc':
+            a_target = v_atom ** (1/3)
+        else:
+            # Default to FCC assumption if unknown
+            a_target = (v_atom * 4.0) ** (1/3)
+            
+        lattice_constants.append(a_target)
+
+    if not lattice_constants:
+        return 3.6 # Generic fallback
+        
+    return float(np.mean(lattice_constants))
