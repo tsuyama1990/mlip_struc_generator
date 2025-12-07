@@ -219,7 +219,22 @@ def run_single_md_thread(
                 # Gradient Temp Update (at start of chunk, approx)
                 if abs(temp_end - temp_start) > 1e-6:
                     current_t = temp_start + (temp_end - temp_start) * (total_steps_done / steps)
+
+                    # 1. Scale Velocities (Kinetic Energy)
                     dyn.set_temperature(temperature_K=current_t)
+
+                    # 2. Update Thermostat Target (The Heat Bath)
+                    # For ASE Langevin (uses 'temp')
+                    if hasattr(dyn, 'temp'):
+                         dyn.temp = current_t
+
+                    # For ASE NPT (uses 'temperature')
+                    elif hasattr(dyn, 'temperature'):
+                        dyn.temperature = current_t
+
+                    # For older ASE NPT/NVT versions
+                    elif hasattr(dyn, 'temperature_K'):
+                        dyn.temperature_K = current_t
                 else:
                     current_t = temp_start
 
