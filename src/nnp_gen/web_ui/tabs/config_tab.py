@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from nnp_gen.core.config import (
     AppConfig, SystemConfig, AlloySystemConfig, MoleculeSystemConfig,
     IonicSystemConfig, CovalentSystemConfig, PhysicsConstraints,
-    ExplorationConfig, SamplingConfig
+    ExplorationConfig, SamplingConfig, UserFileSystemConfig
 )
 from nnp_gen.web_ui.job_manager import JobManager
 from nnp_gen.generators.ionic import validate_element
@@ -17,7 +17,7 @@ from nnp_gen.core.physics import estimate_lattice_constant
 class ConfigViewModel(param.Parameterized):
     # --- System Type Selector ---
     system_type = param.Selector(
-        objects=["alloy", "ionic", "covalent", "molecule"],
+        objects=["alloy", "ionic", "covalent", "molecule", "user_file"],
         default="alloy",
         doc="Type of physical system"
     )
@@ -31,6 +31,13 @@ class ConfigViewModel(param.Parameterized):
     # --- Molecule Fields ---
     molecule_smiles = param.String(default="CCO", doc="SMILES string")
 
+    # --- File Fields ---
+    file_path = param.String(default="", doc="Path to structure file (cif, xyz, etc.)")
+    file_repeat = param.Integer(default=1, bounds=(1, 100), doc="Number of times to duplicate structures")
+
+    # --- Advanced Physics ---
+    vacancy_concentration = param.Number(default=0.0, bounds=(0.0, 0.25), doc="Fraction of vacancies (0.0 - 0.25)")
+
     # --- Constraints ---
     max_atoms = param.Integer(default=200, bounds=(1, 10000))
     min_distance = param.Number(default=1.5, bounds=(0.1, 10.0))
@@ -42,6 +49,10 @@ class ConfigViewModel(param.Parameterized):
     temp_end = param.Number(default=1000.0, bounds=(0.1, 10000.0), doc="End Temp (Gradient)")
     timestep = param.Number(default=1.0, bounds=(0.1, 10.0), doc="Time step (fs)")
     steps = param.Integer(default=1000, bounds=(10, 1000000))
+
+    # --- Monte Carlo ---
+    mc_enabled = param.Boolean(default=False, doc="Enable Hybrid MD/MC")
+    mc_swap_interval = param.Integer(default=100, bounds=(1, 10000), doc="Steps between MC moves")
 
     # --- Actions ---
     status_message = param.String(default="Ready")
@@ -60,8 +71,11 @@ class ConfigViewModel(param.Parameterized):
     @param.depends("system_type")
     def system_settings_panel(self):
         """Dynamic panel based on system type."""
+        help_text = ""
+
         if self.system_type == "alloy":
-            return pn.Column(
+            help_text = "Generate random solid solution alloys. Estimates lattice constant if unknown."
+            content = pn.Column(
                 pn.Param(
                     self.param.alloy_lattice_constant, 
                     name="Lattice Constant",
@@ -69,11 +83,26 @@ class ConfigViewModel(param.Parameterized):
                 ),
             )
         elif self.system_type == "molecule":
-            return pn.Column(
+            help_text = "Generate molecular conformers from SMILES string."
+            content = pn.Column(
                 pn.Param(self.param.molecule_smiles, name="SMILES"),
             )
+        elif self.system_type == "user_file":
+            help_text = "Load structures from disk (CIF, XYZ, POSCAR). Use 'Repeat' to create multiple seeds from one file."
+            content = pn.Column(
+                pn.Param(self.param.file_path, name="File Path"),
+                pn.Param(self.param.file_repeat, name="Repeat Count"),
+            )
+        elif self.system_type == "ionic":
+            help_text = "Generate ionic crystals based on oxidation states (Requires pymatgen for prototypes)."
+            content = pn.pane.Markdown("**Ionic generation relies on backend config for oxidation states.**")
         else:
-            return pn.pane.Markdown(f"**{self.system_type} configuration not fully implemented in UI demo.**")
+            content = pn.pane.Markdown(f"**{self.system_type} configuration not fully implemented in UI demo.**")
+
+        return pn.Column(
+            pn.pane.Markdown(f"ℹ️ **Info:** {help_text}", styles={'background': '#eef', 'padding': '10px', 'border-radius': '5px'}),
+            content
+        )
 
     @param.depends("temperature_mode")
     def exploration_settings_panel(self):
@@ -87,6 +116,18 @@ class ConfigViewModel(param.Parameterized):
                 pn.Param(self.param.temp_start, widgets={'temp_start': pn.widgets.EditableFloatSlider}, name="Start Temp (K)"),
                 pn.Param(self.param.temp_end, widgets={'temp_end': pn.widgets.EditableFloatSlider}, name="End Temp (K)"),
             )
+
+    @param.depends("mc_enabled")
+    def mc_settings_panel(self):
+        if not self.mc_enabled:
+            return pn.Column()
+
+        return pn.Column(
+            pn.pane.Markdown("Configuration for Hybrid MC/MD. Interleaves MC moves with MD steps.", styles={'font-size': '0.9em', 'color': 'gray'}),
+            pn.Param(self.param.mc_swap_interval, name="Swap Interval (steps)"),
+            # Strategy and Pairs are complex list types, hard to map to simple Param widgets in this demo.
+            # We assume defaults (SWAP) or loaded from YAML for now.
+        )
 
     @param.depends("elements_input", watch=True)
     def validate_elements_realtime(self):
@@ -149,14 +190,20 @@ class ConfigViewModel(param.Parameterized):
         constraints["max_atoms"] = self.max_atoms
         constraints["min_distance"] = self.min_distance
 
+        # Vacancy Injection (Supported by Ionic, Alloy, Covalent, UserFile)
+        if self.system_type in ["ionic", "alloy", "covalent", "user_file"]:
+            sys_data["vacancy_concentration"] = self.vacancy_concentration
+
         # Type specific updates
         if self.system_type == "alloy":
             sys_data["lattice_constant"] = self.alloy_lattice_constant
         elif self.system_type == "molecule":
             sys_data["smiles"] = self.molecule_smiles
-            # Ensure elements is optional or inferred for molecule if not provided?
-            # Pydantic model will handle validation.
+        elif self.system_type == "user_file":
+            sys_data["path"] = self.file_path
+            sys_data["repeat"] = self.file_repeat
 
+        # 2. Exploration Config
         expl_data = ensure_dict(config_data, "exploration")
         expl_data["steps"] = self.steps
         expl_data["timestep"] = self.timestep
@@ -167,6 +214,18 @@ class ConfigViewModel(param.Parameterized):
         else:
             expl_data["temp_start"] = self.temp_start
             expl_data["temp_end"] = self.temp_end
+
+        # MC Config
+        if self.mc_enabled:
+            expl_data["method"] = "hybrid_mc_md"
+            mc_data = ensure_dict(expl_data, "mc_config")
+            mc_data["enabled"] = True
+            mc_data["swap_interval"] = self.mc_swap_interval
+            # Strategy defaults to SWAP if not present
+        else:
+            # If manually disabled in UI, ensure it's disabled in config
+            if "mc_config" in expl_data:
+                 expl_data["mc_config"]["enabled"] = False
 
         # 3. Ensure other required sections exist if creating from scratch
         if "sampling" not in config_data:
@@ -190,11 +249,16 @@ class ConfigViewModel(param.Parameterized):
                 if "elements" in sys:
                     self.elements_input = ",".join(sys["elements"])
 
-                # Update param values based on loaded data
                 if "lattice_constant" in sys:
                     self.alloy_lattice_constant = sys["lattice_constant"]
                 if "smiles" in sys:
                     self.molecule_smiles = sys["smiles"]
+                if "path" in sys:
+                    self.file_path = sys["path"]
+                if "repeat" in sys:
+                    self.file_repeat = sys["repeat"]
+                if "vacancy_concentration" in sys:
+                    self.vacancy_concentration = sys["vacancy_concentration"]
 
                 if "constraints" in sys:
                     cons = sys["constraints"]
@@ -217,6 +281,12 @@ class ConfigViewModel(param.Parameterized):
                     self.timestep = expl["timestep"]
                 if "steps" in expl:
                     self.steps = expl["steps"]
+
+                if "mc_config" in expl and expl["mc_config"].get("enabled", False):
+                    self.mc_enabled = True
+                    self.mc_swap_interval = expl["mc_config"].get("swap_interval", 100)
+                else:
+                    self.mc_enabled = False
 
             self.status_message = "Config loaded successfully."
         except Exception as e:
@@ -249,11 +319,8 @@ class ConfigViewModel(param.Parameterized):
             if content != self.logs:
                 self.logs = content
 
-            # Simple progress heuristic based on logs?
-            # Ideally JobManager exposes status.
             status = self.job_manager.get_status(self._last_job_id)
             if status == "running":
-                 # Check logs for keywords and update status message
                  if "Step 1: Structure Generation" in content:
                      self.status_message = "Step 1: Structure Generation..."
                      self.progress_value = max(self.progress_value, 25)
@@ -267,17 +334,12 @@ class ConfigViewModel(param.Parameterized):
                      self.status_message = "Step 4: Saving Results..."
                      self.progress_value = max(self.progress_value, 90)
                  
-                 # Detailed MD Progress
-                 # Log format: "MD Progress: 500/1000"
-                 # We want to map this to range [25, 50] (Exploration phase)
                  import re
                  md_prog_match = re.findall(r"MD Progress: (\d+)/(\d+)", content)
                  if md_prog_match:
-                     # Take the last match
                      current, total = md_prog_match[-1]
                      try:
                          perc = float(current) / float(total)
-                         # Map 0-100% MD to 50-75% overall (Step 2 to Step 3)
                          overall_perc = 50 + (perc * 25)
                          self.progress_value = max(self.progress_value, int(overall_perc))
                          self.status_message = f"MD Progress: {current}/{total} steps"
@@ -338,14 +400,27 @@ class ConfigTab:
         if pn.state.curdoc:
             pn.state.onload(lambda: pn.state.add_periodic_callback(self.vm.update_logs, period=1000))
 
+        # Tooltips / Guidance
+        guidance_box = pn.pane.Markdown("""
+        ### Quick Start
+        1. **Select System Type** (e.g. Alloy, User File).
+        2. **Enter Elements** (e.g. `Cu, Au`).
+        3. **Set Vacancy %** to inject defects.
+        4. **Configure Exploration** (Temp, Steps).
+        5. **Enable MC** for hybrid sampling.
+        6. Click **Run Pipeline**.
+        """, styles={'background': '#f0f0f0', 'padding': '15px', 'border-left': '5px solid #007bff'})
+
         return pn.Row(
             pn.Column(
+                guidance_box,
                 "## Configuration",
                 file_input,
                 pn.Param(self.vm.param.system_type),
                 pn.Param(self.vm.param.elements_input),
                 self.vm.system_settings_panel,
-                "### Physics",
+                "### Advanced Physics",
+                pn.Param(self.vm.param.vacancy_concentration, widgets={'vacancy_concentration': pn.widgets.FloatSlider}),
                 pn.Param(self.vm.param.max_atoms, widgets={'max_atoms': pn.widgets.EditableIntSlider}),
                 pn.Param(self.vm.param.min_distance, widgets={'min_distance': pn.widgets.EditableFloatSlider}),
                 "### MD Exploration",
@@ -353,6 +428,8 @@ class ConfigTab:
                 self.vm.exploration_settings_panel,
                 pn.Param(self.vm.param.timestep, widgets={'timestep': pn.widgets.EditableFloatSlider}),
                 pn.Param(self.vm.param.steps, widgets={'steps': pn.widgets.EditableIntSlider}),
+                pn.Param(self.vm.param.mc_enabled, widgets={'mc_enabled': pn.widgets.Toggle}),
+                self.vm.mc_settings_panel,
                 run_btn,
                 progress_bar,
                 pn.Param(self.vm.param.status_message, widgets={'status_message': {'type': pn.widgets.StaticText, 'styles': {'color': 'black', 'font-weight': 'bold'}}}),

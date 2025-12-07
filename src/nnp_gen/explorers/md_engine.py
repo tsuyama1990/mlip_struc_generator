@@ -2,14 +2,19 @@ import logging
 import concurrent.futures
 import numpy as np
 import time
-from typing import List, Optional, Dict, Any
+import random
+from typing import List, Optional, Dict, Any, Tuple
 from ase import Atoms
 from ase.md.langevin import Langevin
+from ase.md.npt import NPT
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase import units
 from ase.data import covalent_radii
 from tqdm import tqdm
 from nnp_gen.core.interfaces import IExplorer
+from nnp_gen.core.config import ExplorationConfig, MonteCarloConfig, EnsembleType, MCStrategy
+from nnp_gen.core.physics import detect_vacuum
+from nnp_gen.explorers.mc_moves import perform_mc_swap
 import psutil
 import multiprocessing
 import queue
@@ -73,13 +78,6 @@ class CalculatorPool:
         self.device = device
         self.size = size
 
-        # Pre-fill? Or lazy?
-        # Lazy is safer to avoid long startup.
-        # But we must ensure thread safety during creation if multiple threads hit empty queue.
-        # Actually, best pattern is:
-        # Workers try to get from queue. If empty and total created < size, create new.
-        # But queue.Queue doesn't track "total created".
-        # Simplest: Pre-fill.
         logger.info(f"Initializing CalculatorPool with {size} calculators ({model_name})...")
         for _ in range(size):
              calc = _get_calculator(model_name, device)
@@ -93,15 +91,58 @@ class CalculatorPool:
         finally:
             self.queue.put(calc)
 
+def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: float):
+    """
+    Factory to create the appropriate MD integrator (NVT/NPT).
+    """
+    timestep = expl_config.timestep * units.fs
+    ensemble = expl_config.ensemble
+
+    is_vacuum = detect_vacuum(atoms)
+
+    use_npt = False
+
+    if ensemble == EnsembleType.AUTO:
+        if is_vacuum:
+            logger.info("Vacuum/Slab detected: Using NVT (Langevin).")
+            use_npt = False
+        else:
+            logger.info("Bulk detected: Using NPT.")
+            use_npt = True
+    elif ensemble == EnsembleType.NPT:
+        if is_vacuum:
+            logger.warning("User forced NPT on a system with Vacuum. This may lead to infinite expansion.")
+        use_npt = True
+    else: # NVT
+        use_npt = False
+
+    if use_npt:
+        # NPT requires stress support.
+        # Pressure: default 0 (None in config implies 0 if NPT selected? Or we need pressure config)
+        pressure = expl_config.pressure if expl_config.pressure is not None else 0.0
+        # Convert GPa to internal units
+        # ASE units: GPa is not direct, but units.GPa exists.
+        # pressure * units.GPa
+        p_internal = pressure * units.GPa
+
+        # ttime: Characteristic time for thermostat (usually 20*dt)
+        # pfactor: Bulk modulus estimate * time^2.
+        # ASE NPT defaults are often sufficient but let's be explicit if needed.
+        # We stick to standard defaults for robustness.
+        ttime = 25 * units.fs
+        pfactor = 75**2 * units.fs**2 # Default-ish
+
+        # Check if calculator supports stress? ASE will raise error if not.
+        return NPT(atoms, timestep=timestep, temperature_K=current_temp, externalstress=p_internal, ttime=ttime, pfactor=pfactor)
+    else:
+        # NVT (Langevin)
+        friction = 0.002
+        return Langevin(atoms, timestep=timestep, temperature_K=current_temp, friction=friction)
+
 def run_single_md_thread(
     atoms: Atoms,
-    temp_start: float,
-    temp_end: float,
-    steps: int,
-    timestep_fs: float,
-    interval: int,
+    expl_config: ExplorationConfig,
     calc_pool: CalculatorPool,
-    calculator_params: Dict[str, Any],
     timeout_seconds: int = 3600
 ) -> Optional[List[Atoms]]:
     """
@@ -110,19 +151,30 @@ def run_single_md_thread(
     """
     start_time = time.time()
 
+    # Unpack config
+    steps = expl_config.steps
+    timestep_fs = expl_config.timestep
+
+    # Temp
+    if expl_config.temperature_mode == "gradient":
+        temp_start = expl_config.temp_start
+        temp_end = expl_config.temp_end
+    else:
+        temp_start = expl_config.temperature
+        temp_end = expl_config.temperature
+
+    mc_config = expl_config.mc_config
+
     try:
         with calc_pool.get_calculator() as calc:
-            # Clone atoms to avoid mutating the seed in place if shared (seeds are usually unique copies)
-            # atoms = atoms.copy() # Caller passes unique seed? Yes.
-
             atoms.calc = calc
 
             # Initialize velocities at start temperature
             MaxwellBoltzmannDistribution(atoms, temperature_K=temp_start)
             Stationary(atoms)
 
-            # Setup Dynamics
-            dyn = Langevin(atoms, timestep_fs * units.fs, temperature_K=temp_start, friction=0.002)
+            # Setup Dynamics via Factory
+            dyn = _get_integrator(atoms, expl_config, temp_start)
 
             trajectory = []
 
@@ -134,51 +186,64 @@ def run_single_md_thread(
             np.fill_diagonal(thresholds, 0.0)
 
             def step_check():
-                # Timeout check
                 if time.time() - start_time > timeout_seconds:
                     raise MDTimeoutError("MD Simulation timed out.")
-
                 try:
                     dists = atoms.get_all_distances(mic=True)
                     np.fill_diagonal(dists, np.inf)
-
                     min_d = np.min(dists)
                     if min_d < 0.5:
                         raise RuntimeError(f"Structure Exploded: min_dist {min_d:.2f} < 0.5")
-
                     if np.any(dists < thresholds):
                          raise RuntimeError("Structure Exploded: Atomic overlap detected")
-
-                except ValueError as e:
-                    logger.warning(f"MD Step Check Failed (ValueError): {e}")
+                except ValueError:
                     pass
-                except Exception as e:
-                    logger.error(f"MD Step Check Error: {e}")
-                    raise e
 
-            # Initial check
             step_check()
 
-            # Execute simulation in a loop to allow periodic timeout checks
-            for i in range(steps):
-                # Update Temperature for Gradient Mode
+            # --- HYBRID LOOP ---
+            # Chunking Logic
+
+            swap_interval = mc_config.swap_interval if (mc_config and mc_config.enabled) else steps
+            # Snapshot interval for output
+            snap_interval = max(1, steps // 50)
+
+            total_steps_done = 0
+
+            while total_steps_done < steps:
+                # Determine chunk size
+                chunk = min(swap_interval, steps - total_steps_done)
+                if chunk < 1:
+                    break
+
+                # Gradient Temp Update (at start of chunk, approx)
                 if abs(temp_end - temp_start) > 1e-6:
-                    current_t = temp_start + (temp_end - temp_start) * (i / steps)
+                    current_t = temp_start + (temp_end - temp_start) * (total_steps_done / steps)
                     dyn.set_temperature(temperature_K=current_t)
+                else:
+                    current_t = temp_start
 
-                dyn.run(1)
+                # Run MD Chunk
+                dyn.run(chunk)
+                total_steps_done += chunk
                 step_check()
-
-                if (i + 1) % interval == 0:
-                    snap = atoms.copy()
-                    snap.calc = None # Detach calculator
-                    trajectory.append(snap)
                 
-                # Progress logging every 10%
-                if steps >= 10 and (i + 1) % max(1, steps // 10) == 0:
-                    logger.info(f"MD Progress: {i + 1}/{steps}")
+                # Snapshot Logic
+                if total_steps_done % snap_interval < chunk:
+                     snap = atoms.copy()
+                     snap.calc = None
+                     trajectory.append(snap)
 
-            atoms.calc = None # Detach before returning to pool logic (though 'calc' var is local)
+                # MC Logic
+                if mc_config and mc_config.enabled:
+                    # Trigger swap
+                    mc_temp = mc_config.temp if mc_config.temp else current_t
+                    perform_mc_swap(atoms, mc_config, mc_temp, calc)
+
+                if steps >= 10 and total_steps_done % max(1, steps // 10) < chunk:
+                     logger.info(f"MD Progress: {total_steps_done}/{steps}")
+
+            atoms.calc = None
             return trajectory
 
     except MDTimeoutError:
@@ -186,9 +251,6 @@ def run_single_md_thread(
         return None
     except RuntimeError as e:
         logger.warning(f"MD Exploration Failed (RuntimeError): {e}")
-        return None
-    except TimeoutError as e:
-        logger.error(f"MD Exploration Timeout: {e}")
         return None
     except Exception as e:
         logger.error(f"MD Exploration Error: {e}")
@@ -202,9 +264,6 @@ def _calculate_max_workers(n_atoms_estimate: int = 1000) -> int:
     try:
         mem = psutil.virtual_memory()
         available_ram_mb = mem.available / (1024 * 1024)
-        # Using ThreadPool, memory per worker is lower (model shared).
-        # But we still have trajectories.
-        # Let's keep conservative estimate.
         mem_per_worker_mb = 200 + (n_atoms_estimate * 0.001)
         max_workers_mem = int(available_ram_mb / mem_per_worker_mb)
     except Exception:
@@ -225,30 +284,18 @@ class MDExplorer(IExplorer):
 
         # Prepare params
         expl = self.config.exploration
-        steps = expl.steps
-        timestep_fs = expl.timestep
-        interval = max(1, steps // 50)
         
-        # Determine Temperature Constraints
-        if expl.temperature_mode == "gradient":
-             start_t = expl.temp_start
-             end_t = expl.temp_end
-        else:
-             start_t = expl.temperature
-             end_t = expl.temperature
-
         # Determine max workers
         if n_workers is None:
             n_atoms = len(seeds[0]) if seeds else 1000
             n_workers = _calculate_max_workers(n_atoms)
 
-        logger.info(f"Starting MD Exploration with {n_workers} threads. Temp: {start_t}->{end_t} K, dt={timestep_fs} fs")
+        logger.info(f"Starting MD Exploration with {n_workers} threads. Method: {expl.method}")
 
         model_name = expl.model_name
-        device = "cpu" # or from config
+        device = "cpu"
 
         # Initialize Calculator Pool
-        # Pool size = n_workers
         pool = CalculatorPool(model_name, device, size=n_workers)
 
         # Use ThreadPoolExecutor
@@ -256,7 +303,7 @@ class MDExplorer(IExplorer):
             futures = []
             for seed in seeds:
                 futures.append(
-                    executor.submit(run_single_md_thread, seed, start_t, end_t, steps, timestep_fs, interval, pool, {}, 3600)
+                    executor.submit(run_single_md_thread, seed, expl, pool, 3600)
                 )
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(seeds), desc="MD Exploration"):

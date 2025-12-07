@@ -4,6 +4,7 @@ from typing import List
 from ase import Atoms
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import CovalentSystemConfig
+from nnp_gen.core.physics import apply_vacancies
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,11 @@ class CovalentGenerator(BaseGenerator):
 
                 if struc.valid:
                     ase_atoms = struc.to_ase()
+
+                    # Apply Vacancies
+                    if self.config.vacancy_concentration > 0.0:
+                        ase_atoms = apply_vacancies(ase_atoms, self.config.vacancy_concentration, rng)
+
                     structures.append(ase_atoms)
             except Exception as e:
                 # pyxtal generation can fail often, just skip

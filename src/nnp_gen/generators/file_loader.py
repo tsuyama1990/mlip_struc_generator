@@ -1,75 +1,72 @@
 import logging
-import os
-from typing import List, Union
+import numpy as np
+from typing import List, Optional
 from ase import Atoms
 import ase.io
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import UserFileSystemConfig
+from nnp_gen.core.physics import apply_vacancies
 from nnp_gen.core.exceptions import GenerationError
 
 logger = logging.getLogger(__name__)
 
 class FileGenerator(BaseGenerator):
+    """
+    Generator that loads structures from a user-specified file.
+    Supports repeating structures and injecting vacancies.
+    """
     def __init__(self, config: UserFileSystemConfig):
         super().__init__(config)
         self.config = config
 
     def _generate_impl(self) -> List[Atoms]:
         """
-        Loads structures from a user-specified file and duplicates them if configured.
+        Loads structures from the file specified in the config.
         """
-        path = self.config.path
-        if not os.path.exists(path):
-            raise GenerationError(f"Input file not found: {path}")
-
-        logger.info(f"Loading structures from {path}")
+        logger.info(f"Loading structures from file: {self.config.path}")
 
         try:
-            # ase.io.read with index=':' always returns a list of Atoms
-            # If format is None, ASE infers it.
-            structures = ase.io.read(path, index=':', format=self.config.format)
+            # Load structures
+            # ase.io.read can return Atoms or List[Atoms] depending on 'index'
+            # We use index=':' to always get a list
+            loaded = ase.io.read(self.config.path, index=':', format=self.config.format)
+            if isinstance(loaded, Atoms):
+                loaded = [loaded]
 
-            # Ensure it is a list (ase.io.read can return Atoms if index is not specified,
-            # but with index=':' it should be a list. However, let's be safe.)
-            if isinstance(structures, Atoms):
-                structures = [structures]
-            elif not isinstance(structures, list):
-                 # Should not happen with index=':'
-                 structures = [structures]
+            if not loaded:
+                raise GenerationError(f"No structures found in {self.config.path}")
+
+            logger.info(f"Loaded {len(loaded)} structures from file.")
 
         except Exception as e:
-            raise GenerationError(f"Failed to read file {path}: {e}")
+            logger.error(f"Failed to load file {self.config.path}: {e}")
+            raise GenerationError(f"File loading failed: {e}")
 
-        if not structures:
-             logger.warning(f"File {path} contained no structures.")
-             return []
+        final_structures = []
+        rng = np.random.RandomState(42)
 
-        # Cloning Logic
-        repeat_count = self.config.repeat
-        if repeat_count > 1:
-            logger.info(f"Duplicating {len(structures)} structures {repeat_count} times.")
-            # Depending on desire, we can duplicate the whole list n times
-            # or duplicate each item n times.
-            # "Clone that structure 50 times".
-            # If input has 1000 frames, and repeat=1, we get 1000 structures.
-            # If input has 1 frame, and repeat=50, we get 50 structures.
-            # Usually repeat is for single structure seeds.
-            # But let's assume we multiply the list.
+        # Clone logic
+        n_repeats = self.config.repeat
+        if n_repeats < 1:
+            n_repeats = 1
 
-            # A simple multiplication of list works: [A, B] * 2 = [A, B, A, B]
-            # But we should copy them to be safe if we modify them later (rattle is done in base class on copies/in-place?)
-            # BaseGenerator calls _generate_impl, then applies rattle in-place.
-            # So we MUST return independent copies.
+        for atom_obj in loaded:
+            # Basic sanitization
+            # Ensure elements match config if config.elements is strict?
+            # BaseSystemConfig validator checks elements list provided in config.
+            # But the file might contain other elements.
+            # We trust the user here or we could validate.
+            # We should probably update the config elements to match the file if empty?
+            # But config validation happens before generation.
 
-            final_structures = []
-            for _ in range(repeat_count):
-                for atoms in structures:
-                    final_structures.append(atoms.copy())
+            for _ in range(n_repeats):
+                # Copy to ensure independence
+                new_atoms = atom_obj.copy()
 
-            structures = final_structures
-        else:
-            # Even if repeat=1, we should probably ensure they are copies if ASE cached them,
-            # though ASE read usually creates new objects.
-            pass
+                # Apply Vacancies
+                if self.config.vacancy_concentration > 0.0:
+                    new_atoms = apply_vacancies(new_atoms, self.config.vacancy_concentration, rng)
 
-        return structures
+                final_structures.append(new_atoms)
+
+        return final_structures

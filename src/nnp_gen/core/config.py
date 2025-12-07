@@ -6,7 +6,48 @@ from pydantic import BaseModel, Field, model_validator, field_validator
 
 logger = logging.getLogger(__name__)
 
-# --- System Configuration ---
+# --- Enums ---
+
+class EnsembleType(str, Enum):
+    AUTO = "AUTO"
+    NVT = "NVT"
+    NPT = "NPT"
+
+class MCStrategy(str, Enum):
+    SWAP = "SWAP"
+    VACANCY_HOP = "VACANCY_HOP"
+
+# --- Sub-Configurations ---
+
+class MonteCarloConfig(BaseModel):
+    enabled: bool = Field(False, description="Enable Monte Carlo moves")
+    strategy: List[MCStrategy] = Field([MCStrategy.SWAP], description="List of MC strategies to use")
+    swap_interval: int = Field(100, ge=1, description="Number of MD steps between MC moves")
+    swap_pairs: Optional[List[Tuple[str, str]]] = Field(None, description="List of element pairs to swap")
+    allow_charge_mismatch: bool = Field(False, description="Allow swapping ions with different charges")
+    temp: Optional[float] = Field(None, gt=0, description="Temperature for MC acceptance (defaults to MD temp)")
+
+    @field_validator('swap_pairs', mode='before')
+    @classmethod
+    def validate_swap_pairs(cls, v: Any) -> Optional[List[Tuple[str, str]]]:
+        if v is None:
+            return None
+        # Handle List[List[str]] -> List[Tuple[str, str]]
+        if isinstance(v, list):
+            new_list = []
+            for item in v:
+                if isinstance(item, list):
+                    if len(item) != 2:
+                         raise ValueError(f"Swap pair must have exactly 2 elements: {item}")
+                    new_list.append(tuple(item))
+                elif isinstance(item, tuple):
+                     if len(item) != 2:
+                         raise ValueError(f"Swap pair must have exactly 2 elements: {item}")
+                     new_list.append(item)
+                else:
+                    raise ValueError(f"Invalid swap pair format: {item}")
+            return new_list
+        return v
 
 class PhysicsConstraints(BaseModel):
     max_atoms: int = Field(200, description="Hard limit for total number of atoms")
@@ -14,6 +55,8 @@ class PhysicsConstraints(BaseModel):
     min_distance: float = Field(0.5, description="Minimum distance between atoms (Angstrom)")
     min_cell_length_factor: float = Field(1.0, description="Minimum cell length relative to r_cut")
     r_cut: float = Field(5.0, description="Cutoff radius of the potential model")
+
+# --- System Configuration ---
 
 class BaseSystemConfig(BaseModel):
     elements: List[str] = Field(..., min_length=1, description="List of elements in the system")
@@ -26,7 +69,6 @@ class BaseSystemConfig(BaseModel):
     @classmethod
     def validate_elements(cls, v: List[str]) -> List[str]:
         from ase.data import chemical_symbols
-        # chemical_symbols[0] is 'X', [1] is 'H'.
         valid_symbols = set(chemical_symbols)
         for el in v:
             if el not in valid_symbols:
@@ -57,6 +99,14 @@ class IonicSystemConfig(BaseSystemConfig):
     charge_balance_tolerance: float = Field(0.0, description="Tolerance for charge balance")
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
     default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")
+    vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
+
+    @field_validator('vacancy_concentration')
+    @classmethod
+    def validate_vacancy_concentration(cls, v: float) -> float:
+        if not (0.0 <= v <= 0.25):
+            raise ValueError("vacancy_concentration must be between 0.0 and 0.25")
+        return v
 
 class AlloySystemConfig(BaseSystemConfig):
     type: Literal["alloy"] = "alloy"
@@ -64,11 +114,27 @@ class AlloySystemConfig(BaseSystemConfig):
     spacegroup: Optional[int] = Field(None, description="Target spacegroup number (1-230)")
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
     default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")
+    vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
+
+    @field_validator('vacancy_concentration')
+    @classmethod
+    def validate_vacancy_concentration(cls, v: float) -> float:
+        if not (0.0 <= v <= 0.25):
+            raise ValueError("vacancy_concentration must be between 0.0 and 0.25")
+        return v
 
 class CovalentSystemConfig(BaseSystemConfig):
     type: Literal["covalent"] = "covalent"
     dimensionality: Literal[0, 1, 2, 3] = Field(3, description="Dimensionality of the system")
     min_volume: Optional[float] = Field(None, description="Minimum volume per atom")
+    vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
+
+    @field_validator('vacancy_concentration')
+    @classmethod
+    def validate_vacancy_concentration(cls, v: float) -> float:
+        if not (0.0 <= v <= 0.25):
+            raise ValueError("vacancy_concentration must be between 0.0 and 0.25")
+        return v
 
 class MoleculeSystemConfig(BaseSystemConfig):
     type: Literal["molecule"] = "molecule"
@@ -210,12 +276,20 @@ class UserFileSystemConfig(BaseSystemConfig):
     path: str = Field(..., description="Path to the structure file")
     format: Optional[str] = Field(None, description="File format (e.g., 'cif', 'xyz'). If None, inferred from extension.")
     repeat: int = Field(1, description="Number of times to duplicate the structures")
+    vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
 
     @field_validator('repeat')
     @classmethod
     def validate_repeat(cls, v: int) -> int:
         if v < 1:
             raise ValueError("repeat must be at least 1")
+        return v
+
+    @field_validator('vacancy_concentration')
+    @classmethod
+    def validate_vacancy_concentration(cls, v: float) -> float:
+        if not (0.0 <= v <= 0.25):
+            raise ValueError("vacancy_concentration must be between 0.0 and 0.25")
         return v
 
 # Discriminated Union for System Config
@@ -246,6 +320,9 @@ class ExplorationConfig(BaseModel):
     pressure: Optional[float] = Field(None, description="Pressure in GPa (None for NVT)")
     steps: int = Field(1000, description="Number of steps per exploration run")
     timestep: float = Field(1.0, description="Timestep in fs")
+
+    ensemble: EnsembleType = Field(EnsembleType.AUTO, description="MD Ensemble (AUTO, NVT, NPT)")
+    mc_config: Optional[MonteCarloConfig] = Field(default_factory=lambda: MonteCarloConfig(enabled=False), description="Monte Carlo Configuration")
 
     @field_validator('temperature')
     @classmethod
