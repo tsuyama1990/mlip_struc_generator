@@ -1,0 +1,32 @@
+defaults:
+  - system: knowledge
+  - exploration: md
+  - sampling: fps
+  - _self_
+
+system:
+  type: knowledge
+  formula: "LiFe0.5Co0.5O2"
+  use_cod: true
+  use_prototypes: true
+  use_symmetry_generation: true
+  max_supercell_atoms: 200
+  # BaseSystemConfig requirements
+  constraints:
+    max_atoms: 300
+    r_cut: 5.0
+
+exploration:
+  method: md
+  model_name: mace
+  temperature: 300
+  steps: 100
+  timestep: 1.0
+
+sampling:
+  strategy: fps
+  n_samples: 10
+  descriptor_type: soap
+
+output_dir: "output_knowledge_demo"
+seed: 42

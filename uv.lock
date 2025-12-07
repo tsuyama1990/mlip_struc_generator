@@ -1673,6 +1673,9 @@ dev = [
 ionic = [
     { name = "pymatgen" },
 ]
+knowledge = [
+    { name = "pyxtal" },
+]
 ml-calculators = [
     { name = "chgnet" },
     { name = "mace-torch" },
@@ -1715,6 +1718,7 @@ requires-dist = [
     { name = "pytest-mock", marker = "extra == 'dev'" },
     { name = "pyxtal", marker = "extra == 'all'" },
     { name = "pyxtal", marker = "extra == 'covalent'" },
+    { name = "pyxtal", marker = "extra == 'knowledge'" },
     { name = "rdkit", marker = "extra == 'all'" },
     { name = "rdkit", marker = "extra == 'molecule'" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
@@ -1724,7 +1728,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2.0.0,<2.6.0" },
     { name = "tqdm" },
 ]
-provides-extras = ["dev", "ionic", "alloy", "covalent", "molecule", "ml-calculators", "descriptors", "all"]
+provides-extras = ["dev", "ionic", "alloy", "covalent", "knowledge", "molecule", "ml-calculators", "descriptors", "all"]
 
 [package.metadata.requires-dev]
 dev = [
