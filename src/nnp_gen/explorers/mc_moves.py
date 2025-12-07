@@ -5,8 +5,58 @@ from ase import Atoms
 from ase import units
 from typing import List, Tuple, Optional
 from nnp_gen.core.config import MonteCarloConfig, MCStrategy
+from ase.data import covalent_radii
+from ase.neighborlist import neighbor_list
 
 logger = logging.getLogger(__name__)
+
+def _check_hard_sphere_overlap(atoms: Atoms, indices_to_check: List[int], tolerance: float = 0.6) -> bool:
+    """
+    Checks if the specified atoms are too close to any other atoms.
+    Uses covalent radii sum * tolerance as the threshold.
+    Returns True if overlap detected (unsafe).
+    """
+    try:
+        # We only need to check distances for the moved atoms
+        # neighbor_list can be slow for large systems, but robust for PBC
+        # 'd' returns distances
+
+        # Optimization: We only care if ANY distance < threshold
+        # We can iterate over indices_to_check
+
+        positions = atoms.get_positions()
+        cell = atoms.get_cell()
+        pbc = atoms.get_pbc()
+        numbers = atoms.get_atomic_numbers()
+
+        for i in indices_to_check:
+            # Simple check against all others (O(N) per moved atom)
+            # For very large N, neighbor list is better. For N < 1000, this is fine.
+            # But let's use ASE's built-in tools which handle PBC correctly.
+
+            # Using neighbor_list for just one atom is not direct API.
+            # Let's use get_distances()
+
+            # Get distances from atom i to all others
+            # mic=True applies Minimum Image Convention (PBC)
+            dists = atoms.get_distances(i, range(len(atoms)), mic=True)
+
+            r_i = covalent_radii[numbers[i]]
+
+            for j, d in enumerate(dists):
+                if i == j: continue
+
+                r_j = covalent_radii[numbers[j]]
+                limit = (r_i + r_j) * tolerance
+
+                if d < limit:
+                    # logger.debug(f"Overlap detected: {i}-{j} d={d:.2f} < {limit:.2f}")
+                    return True
+        return False
+
+    except Exception as e:
+        logger.warning(f"Overlap check failed: {e}")
+        return True # Fail safe
 
 def perform_mc_swap(atoms: Atoms, mc_config: MonteCarloConfig, temp: float, calc) -> bool:
     """
@@ -65,6 +115,12 @@ def perform_mc_swap(atoms: Atoms, mc_config: MonteCarloConfig, temp: float, calc
 
         # Apply move
         atoms.positions[idx] += displacement
+
+        # Safety: Geometric Overlap Check
+        if _check_hard_sphere_overlap(atoms, [idx]):
+            logger.info("Vacancy Hop rejected due to hard sphere overlap.")
+            atoms.positions[idx] = original_positions[0] # Revert immediately
+            return False
 
     # --- STRATEGY B: SWAP ---
     elif strategy == MCStrategy.SWAP:

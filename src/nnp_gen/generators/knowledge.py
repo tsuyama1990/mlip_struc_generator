@@ -41,6 +41,9 @@ class KnowledgeBasedGenerator(BaseGenerator):
                 structures = self._query_cod(self.config.formula)
                 if structures:
                     logger.info(f"Found {len(structures)} structures via exact COD match.")
+                    # Safety: Add Oxidation States for MC Compatibility
+                    for atoms in structures:
+                        self._add_oxidation_states(atoms)
                     return structures
             except Exception as e:
                 logger.warning(f"COD Exact Match failed: {e}")
@@ -52,6 +55,9 @@ class KnowledgeBasedGenerator(BaseGenerator):
                 structures = self._generate_from_prototype(self.config.formula)
                 if structures:
                     logger.info(f"Found {len(structures)} structures via Prototype Substitution.")
+                    # Safety: Add Oxidation States for MC Compatibility
+                    for atoms in structures:
+                        self._add_oxidation_states(atoms)
                     return structures
             except Exception as e:
                 logger.warning(f"Prototype Substitution failed: {e}")
@@ -63,6 +69,9 @@ class KnowledgeBasedGenerator(BaseGenerator):
                 structures = self._generate_with_pyxtal(self.config.formula)
                 if structures:
                     logger.info(f"Generated {len(structures)} structures via Pyxtal.")
+                    # Safety: Add Oxidation States for MC Compatibility
+                    for atoms in structures:
+                        self._add_oxidation_states(atoms)
                     return structures
             except Exception as e:
                 logger.warning(f"Pyxtal generation failed: {e}")
@@ -71,6 +80,60 @@ class KnowledgeBasedGenerator(BaseGenerator):
             raise GenerationError(f"All knowledge-based strategies failed for {self.config.formula}")
 
         return structures
+
+    def _add_oxidation_states(self, atoms: Atoms):
+        """
+        Guesses oxidation states based on the config formula and assigns them to atoms.initial_charges.
+        Required for MC charge safety checks.
+        """
+        try:
+            # We use the target formula to guess standard oxidation states
+            # Handle fractional formulas like LiFe0.5Co0.5O2 which pymatgen's oxi_state_guesses might dislike if it expects integer stoichiometry?
+            # Actually, oxi_state_guesses works on Composition. But if it fails, we can try to normalize or get integer formula.
+            comp = Composition(self.config.formula)
+
+            # oxi_state_guesses can raise "Charge balance analysis requires integer values in Composition!"
+            # We can try to get integer formula first.
+            try:
+                guesses = comp.oxi_state_guesses()
+            except ValueError:
+                # Try integer formula
+                # comp.get_integer_formula_and_factor() returns (Composition, factor) in newer pymatgen?
+                # Or (str, factor)? Let's check.
+                # In older versions it returned (str, factor).
+                # If it returns str, we need to wrap in Composition.
+
+                int_formula, factor = comp.get_integer_formula_and_factor()
+                if isinstance(int_formula, str):
+                    int_comp = Composition(int_formula)
+                else:
+                    int_comp = int_formula
+
+                guesses = int_comp.oxi_state_guesses()
+
+            if not guesses:
+                logger.warning(f"No likely oxidation states found for {self.config.formula}. MC charge safety will be disabled for this system.")
+                return
+
+            # Use the most likely guess (index 0)
+            # guesses[0] is a dict like {'Li': 1, 'Fe': 3, 'O': -2}
+            oxi_map = {str(k): v for k, v in guesses[0].items()}
+
+            charges = []
+            for atom in atoms:
+                sym = atom.symbol
+                if sym in oxi_map:
+                    charges.append(oxi_map[sym])
+                else:
+                    # Fallback: Try to guess element oxidation state independently?
+                    # Or just 0.0
+                    charges.append(0.0)
+
+            atoms.set_initial_charges(charges)
+            logger.info(f"Assigned inferred oxidation states to structure: {oxi_map}")
+
+        except Exception as e:
+            logger.warning(f"Failed to assign oxidation states: {e}")
 
     def _query_cod(self, formula: str) -> List[Atoms]:
         """
@@ -115,7 +178,7 @@ class KnowledgeBasedGenerator(BaseGenerator):
 
             trans = OrderDisorderedStructureTransformation(
                 no_oxi_states=True,
-                symmetrize=False # Keep it simple
+                # symmetrize=False # Keep it simple - 'symmetrize' argument seems invalid in current pymatgen version
             )
 
             # transformations return a list of dicts [{'structure': ...}, ...]
@@ -160,6 +223,7 @@ class KnowledgeBasedGenerator(BaseGenerator):
 
         # If no ordered ones, try to order them first
         if not ordered_prototypes:
+             logger.info(f"No ordered prototypes found for {end_member_formula}. Attempting to order disordered ones.")
              for p in prototypes:
                  ordered_atoms = self._order_disordered_structure(p)
                  if ordered_atoms:
