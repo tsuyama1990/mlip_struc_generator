@@ -3,6 +3,7 @@ import concurrent.futures
 import numpy as np
 import time
 import random
+import os
 from typing import List, Optional, Dict, Any, Tuple
 from ase import Atoms
 from ase.md.langevin import Langevin
@@ -15,15 +16,11 @@ from nnp_gen.core.interfaces import IExplorer
 from nnp_gen.core.config import ExplorationConfig, MonteCarloConfig, EnsembleType, MCStrategy
 from nnp_gen.core.physics import detect_vacuum
 from nnp_gen.explorers.mc_moves import perform_mc_swap
+from nnp_gen.core.exceptions import PhysicsViolationError, TimeoutError
 import psutil
 import multiprocessing
-import queue
-from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
-
-class MDTimeoutError(Exception):
-    pass
 
 def _get_calculator(model_name: str, device: str):
     """
@@ -37,7 +34,8 @@ def _get_calculator(model_name: str, device: str):
             torch.set_num_threads(1)
             torch.set_num_interop_threads(1)
         except RuntimeError as e:
-            logger.debug(f"Could not set torch threads (already initialized): {e}")
+            # This is expected if torch is already initialized
+            pass
 
     except ImportError:
         pass
@@ -47,12 +45,11 @@ def _get_calculator(model_name: str, device: str):
             from mace.calculators import mace_mp
             return mace_mp(model="small", device=device, default_dtype="float32")
         except ImportError:
-             logger.warning("mace_mp not found in mace.calculators. Falling back to MACECalculator with direct path check (will likely fail if 'small' is not a file).")
+             logger.warning("mace_mp not found in mace.calculators. Falling back to MACECalculator with direct path check.")
              from mace.calculators import MACECalculator
              return MACECalculator(model_paths="small", device=device, default_dtype="float32")
         except Exception as e:
-             logger.error(f"Error loading MACE model: {e}")
-             raise e
+             raise ImportError(f"Error loading MACE model: {e}")
 
     elif model_name == "sevenn":
         try:
@@ -68,29 +65,6 @@ def _get_calculator(model_name: str, device: str):
     else:
         raise ImportError(f"Unknown model: {model_name}")
 
-class CalculatorPool:
-    """
-    Thread-safe pool of calculators.
-    """
-    def __init__(self, model_name: str, device: str, size: int):
-        self.queue = queue.Queue(maxsize=size)
-        self.model_name = model_name
-        self.device = device
-        self.size = size
-
-        logger.info(f"Initializing CalculatorPool with {size} calculators ({model_name})...")
-        for _ in range(size):
-             calc = _get_calculator(model_name, device)
-             self.queue.put(calc)
-
-    @contextmanager
-    def get_calculator(self):
-        calc = self.queue.get()
-        try:
-            yield calc
-        finally:
-            self.queue.put(calc)
-
 def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: float):
     """
     Factory to create the appropriate MD integrator (NVT/NPT).
@@ -104,10 +78,10 @@ def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: 
 
     if ensemble == EnsembleType.AUTO:
         if is_vacuum:
-            logger.info("Vacuum/Slab detected: Using NVT (Langevin).")
+            logger.debug("Vacuum/Slab detected: Using NVT (Langevin).")
             use_npt = False
         else:
-            logger.info("Bulk detected: Using NPT.")
+            logger.debug("Bulk detected: Using NPT.")
             use_npt = True
     elif ensemble == EnsembleType.NPT:
         if is_vacuum:
@@ -117,43 +91,33 @@ def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: 
         use_npt = False
 
     if use_npt:
-        # NPT requires stress support.
-        # Pressure: default 0 (None in config implies 0 if NPT selected? Or we need pressure config)
         pressure = expl_config.pressure if expl_config.pressure is not None else 0.0
-        # Convert GPa to internal units
-        # ASE units: GPa is not direct, but units.GPa exists.
-        # pressure * units.GPa
         p_internal = pressure * units.GPa
-
-        # ttime: Characteristic time for thermostat (usually 20*dt)
-        # pfactor: Bulk modulus estimate * time^2.
-        # ASE NPT defaults are often sufficient but let's be explicit if needed.
-        # We stick to standard defaults for robustness.
         ttime = 25 * units.fs
         pfactor = 75**2 * units.fs**2 # Default-ish
 
-        # Check if calculator supports stress? ASE will raise error if not.
         return NPT(atoms, timestep=timestep, temperature_K=current_temp, externalstress=p_internal, ttime=ttime, pfactor=pfactor)
     else:
         # NVT (Langevin)
         friction = 0.002
         return Langevin(atoms, timestep=timestep, temperature_K=current_temp, friction=friction)
 
-def run_single_md_thread(
+def run_single_md_process(
     atoms: Atoms,
     expl_config: ExplorationConfig,
-    calc_pool: CalculatorPool,
+    model_name: str,
+    device: str,
     timeout_seconds: int = 3600
 ) -> Optional[List[Atoms]]:
     """
-    Run a single MD trajectory using a calculator from the pool.
-    Designed for ThreadPoolExecutor.
+    Run a single MD trajectory.
+    Instantiates its own calculator (Late Binding).
+    Designed for ProcessPoolExecutor.
     """
     start_time = time.time()
 
     # Unpack config
     steps = expl_config.steps
-    timestep_fs = expl_config.timestep
 
     # Temp
     if expl_config.temperature_mode == "gradient":
@@ -166,95 +130,112 @@ def run_single_md_thread(
     mc_config = expl_config.mc_config
 
     try:
-        with calc_pool.get_calculator() as calc:
-            atoms.calc = calc
+        # Instantiate Calculator Locally
+        calc = _get_calculator(model_name, device)
+        atoms.calc = calc
 
-            # Initialize velocities at start temperature
-            MaxwellBoltzmannDistribution(atoms, temperature_K=temp_start)
-            Stationary(atoms)
+        # Initialize velocities at start temperature
+        MaxwellBoltzmannDistribution(atoms, temperature_K=temp_start)
+        Stationary(atoms)
 
-            # Setup Dynamics via Factory
-            dyn = _get_integrator(atoms, expl_config, temp_start)
+        # Setup Dynamics via Factory
+        dyn = _get_integrator(atoms, expl_config, temp_start)
 
-            trajectory = []
+        trajectory = []
 
-            # Precompute thresholds for overlap check
-            radii = covalent_radii[atoms.numbers]
-            sum_radii = radii[:, None] + radii[None, :]
-            overlap_threshold_ratio = 0.5
-            thresholds = sum_radii * overlap_threshold_ratio
-            np.fill_diagonal(thresholds, 0.0)
+        # Check N>1 for Langevin stability
+        if len(atoms) <= 1:
+             logger.warning("MD simulation requested for single atom. Skipping MD stability check that requires N>1.")
+             if len(atoms) == 1:
+                  logger.warning("Cannot run Langevin dynamics on a single atom due to ASE limitations. Returning initial structure.")
+                  atoms.calc = None
+                  return [atoms]
 
-            def step_check():
-                if time.time() - start_time > timeout_seconds:
-                    raise MDTimeoutError("MD Simulation timed out.")
-                try:
-                    dists = atoms.get_all_distances(mic=True)
-                    np.fill_diagonal(dists, np.inf)
-                    min_d = np.min(dists)
-                    if min_d < 0.5:
-                        raise RuntimeError(f"Structure Exploded: min_dist {min_d:.2f} < 0.5")
-                    if np.any(dists < thresholds):
-                         raise RuntimeError("Structure Exploded: Atomic overlap detected")
-                except ValueError:
-                    pass
+        radii = covalent_radii[atoms.numbers]
+        sum_radii = radii[:, None] + radii[None, :]
+        overlap_threshold_ratio = 0.5
+        thresholds = sum_radii * overlap_threshold_ratio
+        np.fill_diagonal(thresholds, 0.0)
 
+        def step_check():
+            if time.time() - start_time > timeout_seconds:
+                raise TimeoutError("MD Simulation timed out.")
+            try:
+                # Basic overlap check
+                dists = atoms.get_all_distances(mic=True)
+                np.fill_diagonal(dists, np.inf)
+                min_d = np.min(dists)
+                if min_d < 0.5:
+                    raise PhysicsViolationError(f"Structure Exploded: min_dist {min_d:.2f} < 0.5")
+
+                # Element-specific check
+                if np.any(dists < thresholds):
+                     raise PhysicsViolationError("Structure Exploded: Atomic overlap detected")
+            except ValueError:
+                pass
+
+        step_check()
+
+        # --- HYBRID LOOP ---
+        swap_interval = mc_config.swap_interval if (mc_config and mc_config.enabled) else steps
+        snap_interval = max(1, steps // 50)
+
+        total_steps_done = 0
+
+        while total_steps_done < steps:
+            # Determine chunk size
+            chunk = min(swap_interval, steps - total_steps_done)
+            if chunk < 1:
+                break
+
+            # Gradient Temp Update
+            if abs(temp_end - temp_start) > 1e-6:
+                current_t = temp_start + (temp_end - temp_start) * (total_steps_done / steps)
+                dyn.set_temperature(temperature_K=current_t)
+            else:
+                current_t = temp_start
+
+            # Run MD Chunk
+            dyn.run(chunk)
+            total_steps_done += chunk
             step_check()
 
-            # --- HYBRID LOOP ---
-            # Chunking Logic
+            # Snapshot Logic
+            if total_steps_done % snap_interval < chunk:
+                 snap = atoms.copy()
+                 snap.calc = None
+                 trajectory.append(snap)
 
-            swap_interval = mc_config.swap_interval if (mc_config and mc_config.enabled) else steps
-            # Snapshot interval for output
-            snap_interval = max(1, steps // 50)
+            # MC Logic
+            if mc_config and mc_config.enabled:
+                mc_temp = mc_config.temp if mc_config.temp else current_t
+                perform_mc_swap(atoms, mc_config, mc_temp, calc)
 
-            total_steps_done = 0
+        atoms.calc = None
+        return trajectory
 
-            while total_steps_done < steps:
-                # Determine chunk size
-                chunk = min(swap_interval, steps - total_steps_done)
-                if chunk < 1:
-                    break
+    except (PhysicsViolationError, TimeoutError, Exception) as e:
+        # Catch all exceptions to dump debug structure locally
+        # Since we are in a worker, we should write to a file that won't collide.
+        try:
+             # Just dump to CWD/debug or tmp?
+             # We don't have access to configured debug_dir easily unless passed.
+             # We'll try to dump to "debug/" in CWD.
+             debug_dir = "debug"
+             if not os.path.exists(debug_dir):
+                 os.makedirs(debug_dir, exist_ok=True)
 
-                # Gradient Temp Update (at start of chunk, approx)
-                if abs(temp_end - temp_start) > 1e-6:
-                    current_t = temp_start + (temp_end - temp_start) * (total_steps_done / steps)
-                    dyn.set_temperature(temperature_K=current_t)
-                else:
-                    current_t = temp_start
+             pid = os.getpid()
+             filename = os.path.join(debug_dir, f"worker_{pid}_failed.xyz")
+             atoms.info['error'] = str(e)
+             from ase.io import write
+             write(filename, atoms)
+             logger.error(f"Worker {pid} failed. Dumped state to {filename}. Error: {e}")
+        except Exception as dump_err:
+             logger.error(f"Worker {pid} failed and could not dump state: {dump_err}")
 
-                # Run MD Chunk
-                dyn.run(chunk)
-                total_steps_done += chunk
-                step_check()
-                
-                # Snapshot Logic
-                if total_steps_done % snap_interval < chunk:
-                     snap = atoms.copy()
-                     snap.calc = None
-                     trajectory.append(snap)
-
-                # MC Logic
-                if mc_config and mc_config.enabled:
-                    # Trigger swap
-                    mc_temp = mc_config.temp if mc_config.temp else current_t
-                    perform_mc_swap(atoms, mc_config, mc_temp, calc)
-
-                if steps >= 10 and total_steps_done % max(1, steps // 10) < chunk:
-                     logger.info(f"MD Progress: {total_steps_done}/{steps}")
-
-            atoms.calc = None
-            return trajectory
-
-    except MDTimeoutError:
-        logger.warning("MD Simulation timed out.")
-        return None
-    except RuntimeError as e:
-        logger.warning(f"MD Exploration Failed (RuntimeError): {e}")
-        return None
-    except Exception as e:
-        logger.error(f"MD Exploration Error: {e}")
-        return None
+        # Re-raise to let caller know
+        raise e
 
 def _calculate_max_workers(n_atoms_estimate: int = 1000) -> int:
     """
@@ -264,7 +245,7 @@ def _calculate_max_workers(n_atoms_estimate: int = 1000) -> int:
     try:
         mem = psutil.virtual_memory()
         available_ram_mb = mem.available / (1024 * 1024)
-        mem_per_worker_mb = 200 + (n_atoms_estimate * 0.001)
+        mem_per_worker_mb = 300 + (n_atoms_estimate * 0.002) # Adjusted for Process overhead
         max_workers_mem = int(available_ram_mb / mem_per_worker_mb)
     except Exception:
         max_workers_mem = cpu_count
@@ -278,32 +259,36 @@ class MDExplorer(IExplorer):
 
     def explore(self, seeds: List[Atoms], n_workers: Optional[int] = None) -> List[Atoms]:
         """
-        Run parallel MD on seeds.
+        Run parallel MD on seeds using ProcessPoolExecutor.
         """
         results = []
 
         # Prepare params
         expl = self.config.exploration
+        model_name = expl.model_name
+
+        # Determine device
+        device = getattr(expl, 'device', 'cpu')
+
+        # Enforce max_workers=1 for CUDA
+        if "cuda" in device.lower():
+            if n_workers is not None and n_workers > 1:
+                logger.warning("CUDA detected: Forcing max_workers=1 to prevent multiprocessing errors.")
+            n_workers = 1
         
-        # Determine max workers
         if n_workers is None:
             n_atoms = len(seeds[0]) if seeds else 1000
             n_workers = _calculate_max_workers(n_atoms)
 
-        logger.info(f"Starting MD Exploration with {n_workers} threads. Method: {expl.method}")
+        logger.info(f"Starting MD Exploration with {n_workers} processes. Method: {expl.method} on {device}")
 
-        model_name = expl.model_name
-        device = "cpu"
-
-        # Initialize Calculator Pool
-        pool = CalculatorPool(model_name, device, size=n_workers)
-
-        # Use ThreadPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
+        # Use ProcessPoolExecutor
+        # We pass config and model string, not calculator objects.
+        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = []
             for seed in seeds:
                 futures.append(
-                    executor.submit(run_single_md_thread, seed, expl, pool, 3600)
+                    executor.submit(run_single_md_process, seed, expl, model_name, device, 3600)
                 )
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(seeds), desc="MD Exploration"):
@@ -313,5 +298,8 @@ class MDExplorer(IExplorer):
                         results.extend(traj)
                 except Exception as e:
                     logger.error(f"Worker failed: {e}")
+                    # We might want to re-raise specific errors if we want the runner to see them?
+                    # The runner catches specific errors now.
+                    raise e
 
         return results
