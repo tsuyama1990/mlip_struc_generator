@@ -171,6 +171,40 @@ class SolventAdsorbateSystemConfig(VacuumAdsorbateSystemConfig):
     solvent_density: float = Field(1.0, description="Target solvent density in g/cm^3")
     solvent_smiles: str = Field("O", description="SMILES string for the solvent (default Water)")
 
+class KnowledgeSystemConfig(BaseSystemConfig):
+    type: Literal["knowledge"] = "knowledge"
+    formula: str = Field(..., description="Chemical formula (e.g., 'LiFe0.5Co0.5O2')")
+    use_cod: bool = Field(True, description="Attempt to query COD for exact matches")
+    use_materials_project: bool = Field(False, description="Attempt to query Materials Project (requires API key)")
+    mp_api_key: Optional[str] = Field(None, description="Materials Project API Key")
+    use_prototypes: bool = Field(True, description="Attempt to use anonymous prototypes if exact match fails")
+    use_symmetry_generation: bool = Field(True, description="Fallback to random symmetry generation (Pyxtal)")
+    max_supercell_atoms: int = Field(200, description="Max atoms in supercell for disordered structures")
+
+    @field_validator('formula')
+    @classmethod
+    def validate_formula(cls, v: str) -> str:
+        from pymatgen.core import Composition
+        try:
+            Composition(v)
+        except Exception:
+            raise ValueError(f"Invalid chemical formula: {v}")
+        return v
+
+    @model_validator(mode='before')
+    @classmethod
+    def extract_elements(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if 'elements' not in data or not data['elements']:
+                if 'formula' in data:
+                    from pymatgen.core import Composition
+                    try:
+                        comp = Composition(data['formula'])
+                        data['elements'] = [str(el) for el in comp.elements]
+                    except Exception:
+                        pass # Let field validator handle it
+        return data
+
 class UserFileSystemConfig(BaseSystemConfig):
     type: Literal["user_file"] = "user_file"
     path: str = Field(..., description="Path to the structure file")
@@ -193,7 +227,8 @@ SystemConfig = Union[
     InterfaceSystemConfig,
     VacuumAdsorbateSystemConfig,
     SolventAdsorbateSystemConfig,
-    UserFileSystemConfig
+    UserFileSystemConfig,
+    KnowledgeSystemConfig
 ]
 
 # --- Exploration Configuration ---

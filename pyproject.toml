@@ -34,6 +34,7 @@ dev = [
 ionic = ["pymatgen"]
 alloy = ["icet"]
 covalent = ["pyxtal"]
+knowledge = ["pyxtal"]
 molecule = ["rdkit"]
 ml-calculators = ["mace-torch", "sevenn", "matgl", "chgnet"]
 descriptors = ["dscribe"]

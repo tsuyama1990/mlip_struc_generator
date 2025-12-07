@@ -7,6 +7,7 @@ from nnp_gen.generators.molecule import MoleculeGenerator
 from nnp_gen.generators.interface import InterfaceGenerator
 from nnp_gen.generators.adsorption import VacuumAdsorbateGenerator, SolventAdsorbateGenerator
 from nnp_gen.generators.file_loader import FileGenerator
+from nnp_gen.generators.knowledge import KnowledgeBasedGenerator
 
 class GeneratorFactory:
     """
@@ -42,5 +43,7 @@ class GeneratorFactory:
             return SolventAdsorbateGenerator(config)
         elif config.type == "user_file":
             return FileGenerator(config)
+        elif config.type == "knowledge":
+            return KnowledgeBasedGenerator(config)
         else:
             raise ValueError(f"Unknown system type: {config.type}")
