@@ -112,6 +112,7 @@ class IonicSystemConfig(BaseSystemConfig):
 class AlloySystemConfig(BaseSystemConfig):
     type: Literal["alloy"] = "alloy"
     lattice_constant: Optional[float] = Field(None, description="Approximate lattice constant")
+    lattice_estimation_method: Literal["mean", "max"] = Field("max", description="Method to estimate lattice constant ('mean' or 'max')")
     spacegroup: Optional[int] = Field(None, description="Target spacegroup number (1-230)")
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
     default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")

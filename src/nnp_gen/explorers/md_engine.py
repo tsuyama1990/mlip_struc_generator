@@ -165,7 +165,8 @@ def run_single_md_process(
 
         while total_steps_done < steps:
             # Determine chunk size
-            chunk = min(swap_interval, steps - total_steps_done)
+            stride = min(swap_interval, snap_interval)
+            chunk = min(stride, steps - total_steps_done)
             if chunk < 1:
                 break
 

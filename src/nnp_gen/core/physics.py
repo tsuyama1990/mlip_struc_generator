@@ -169,13 +169,16 @@ def ensure_supercell_size(atoms: Atoms, r_cut: float, factor: float = 1.0) -> At
     supercell = atoms * repeat
     return supercell
 
-def estimate_lattice_constant(elements: List[str], structure: str = "fcc") -> float:
+def estimate_lattice_constant(elements: List[str], structure: str = "fcc", method: str = "max") -> float:
     """
-    Estimates the lattice constant for an alloy using Vegard's Law (volume averaging).
+    Estimates the lattice constant for an alloy.
     
     Args:
         elements (List[str]): List of element symbols.
         structure (str): Target crystal structure ('fcc', 'bcc', 'sc').
+        method (str): Aggregation method. 
+                      'mean' = Vegard's Law (average). Good for dense packing, bad for size mismatch.
+                      'max' = Use largest atom. Safe against overlap, but lower density.
     
     Returns:
         float: Estimated lattice constant in Angstroms.
@@ -235,7 +238,11 @@ def estimate_lattice_constant(elements: List[str], structure: str = "fcc") -> fl
     if not lattice_constants:
         raise GenerationError(f"Unable to estimate lattice constant for elements: {elements}")
         
-    return float(np.mean(lattice_constants))
+    if method == "max":
+        return float(np.max(lattice_constants))
+    else:
+        # Default to mean (Vegard's Law)
+        return float(np.mean(lattice_constants))
 
 def detect_vacuum(atoms: Atoms, threshold: float = 5.0) -> bool:
     """

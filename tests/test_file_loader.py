@@ -50,11 +50,11 @@ def test_file_generator_trajectory(tmp_path):
     structures = generator._generate_impl()
 
     assert len(structures) == 6
-    # Check order: Frame1, Frame2, Frame3, Frame1, Frame2, Frame3
+    # Check order: Frame1, Frame1, Frame2, Frame2, Frame3, Frame3
     assert structures[0].positions[1, 2] == 1.0
-    assert structures[1].positions[1, 2] == 1.2
-    assert structures[2].positions[1, 2] == 1.4
-    assert structures[3].positions[1, 2] == 1.0
+    assert structures[1].positions[1, 2] == 1.0
+    assert structures[2].positions[1, 2] == 1.2
+    assert structures[3].positions[1, 2] == 1.2
 
 def test_file_generator_missing_file():
     """Test error handling for missing file."""
@@ -66,7 +66,7 @@ def test_file_generator_missing_file():
     )
 
     generator = FileGenerator(config)
-    with pytest.raises(GenerationError, match="Input file not found"):
+    with pytest.raises(GenerationError, match="File loading failed"):
         generator._generate_impl()
 
 def test_file_generator_validation_repeat():

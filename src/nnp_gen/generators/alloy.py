@@ -31,7 +31,7 @@ class AlloyGenerator(BaseGenerator):
         if self.config.lattice_constant:
              a = self.config.lattice_constant
         else:
-             a = estimate_lattice_constant(self.config.elements, structure=struc_type)
+             a = estimate_lattice_constant(self.config.elements, structure=struc_type, method=self.config.lattice_estimation_method)
              logger.info(f"Estimated lattice constant a={a:.3f} A")
 
         try:

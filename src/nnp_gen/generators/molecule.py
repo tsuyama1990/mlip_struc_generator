@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Optional
 from ase import Atoms
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import MoleculeSystemConfig
@@ -7,8 +7,8 @@ from nnp_gen.core.config import MoleculeSystemConfig
 logger = logging.getLogger(__name__)
 
 class MoleculeGenerator(BaseGenerator):
-    def __init__(self, config: MoleculeSystemConfig):
-        super().__init__(config)
+    def __init__(self, config: MoleculeSystemConfig, seed: Optional[int] = None):
+        super().__init__(config, seed=seed)
         self.config = config
 
     def _generate_impl(self) -> List[Atoms]:

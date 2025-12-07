@@ -39,6 +39,53 @@ def validate_element(el: str) -> str:
         raise ValueError(f"Invalid element symbol: {el}")
     return el_clean
 
+# --- Radius Strategies ---
+
+class RadiusStrategy:
+    def get_radius(self, species: str, charge: Optional[int] = None) -> float:
+        raise NotImplementedError
+
+class PymatgenRadiusStrategy(RadiusStrategy):
+    def __init__(self):
+        try:
+            import pymatgen.core as pmg
+            from pymatgen.core import Species, Element
+            self.Species = Species
+            self.Element = Element
+        except ImportError:
+            raise ImportError("Pymatgen not installed")
+
+    def get_radius(self, species: str, charge: Optional[int] = None) -> float:
+        # Tier 1: Oxidation State Inference / Shannon Radii
+        if charge is not None:
+            try:
+                sp = self.Species(species, oxidation_state=charge)
+                radius = sp.get_shannon_radius(cn="VI")
+                if radius:
+                    return radius
+            except Exception:
+                pass 
+
+        # Tier 2: Fallback to Atomic Radius
+        el = self.Element(species)
+        if el.average_ionic_radius:
+            return el.average_ionic_radius
+        
+        if el.atomic_radius:
+            return el.atomic_radius
+            
+        raise GenerationError(f"Could not determine radius for species {species}")
+
+class FallbackRadiusStrategy(RadiusStrategy):
+    def get_radius(self, species: str, charge: Optional[int] = None) -> float:
+        # Simple heuristic using ASE covalent radii
+        # This is not physically accurate for ions but allows code to run without pymatgen
+        try:
+            return covalent_radii[atomic_numbers[species]]
+        except KeyError:
+             raise GenerationError(f"Unknown element: {species}")
+
+
 class IonicGenerator(BaseGenerator):
     def __init__(self, config: IonicSystemConfig, seed: Optional[int] = None):
         super().__init__(config, seed=seed)
@@ -52,29 +99,29 @@ class IonicGenerator(BaseGenerator):
              except ValueError as e:
                  logger.error(str(e))
                  raise GenerationError(str(e))
-        # Update config with sanitized elements (assuming mutable)
         self.config.elements = clean_elements
 
-        # Check for optional dependencies
-        try:
-            import pymatgen.core as pmg
-            from pymatgen.symmetry.structure import SymmetrizedStructure
-            from pymatgen.core import Lattice, Species, Element
-            self.pmg = pmg
-            self.Species = Species
-            self.Lattice = Lattice
-            self.Element = Element
-            self.has_pmg = True
-        except ImportError:
-            if getattr(self.config, 'strict_mode', True):
-                raise ImportError("Pymatgen required for accurate Ionic Generation. Install it or disable strict_mode.")
-
-            self.has_pmg = False
-            self.pmg = None
-            self.Lattice = None
-            self.Species = None
-            self.Element = None
-            logger.warning("pymatgen not installed. IonicGenerator functionality will be severely limited.")
+        # Select Radius Strategy
+        self.strategy: RadiusStrategy
+        self.has_pmg = False
+        
+        if not getattr(self.config, 'strict_mode', True):
+             # Try to import but allow failure
+             try:
+                 self.strategy = PymatgenRadiusStrategy()
+                 self.has_pmg = True
+                 self._setup_pmg() # Helper to setup pmg internal refs if needed for prototype generation
+             except ImportError:
+                 self.strategy = FallbackRadiusStrategy()
+                 logger.warning("Pymatgen not installed. Using fallback radius strategy (Covalent Radii). Accuracy reduced.")
+        else:
+             # Strict mode: Force pymatgen
+             try:
+                 self.strategy = PymatgenRadiusStrategy()
+                 self.has_pmg = True
+                 self._setup_pmg()
+             except ImportError:
+                 raise ImportError("Pymatgen required for Ionic Generation in strict mode. Install it or disable strict_mode.")
 
     def _generate_impl(self) -> List[Atoms]:
         """
@@ -135,50 +182,14 @@ class IonicGenerator(BaseGenerator):
 
         atoms.set_initial_charges(charges)
 
-    def _get_heuristic_radius(self, species_str: str, charge: Optional[int] = None) -> float:
-        """
-        Get the radius of a species for lattice constant estimation using a tiered heuristic.
+    def _setup_pmg(self):
+        import pymatgen.core as pmg
+        from pymatgen.core import Lattice
+        self.pmg = pmg
+        self.Lattice = Lattice
 
-        Tier 1: Shannon effective ionic radii (via pymatgen).
-        Tier 2: Electronegativity-scaled fallback (TODO: refined scaling), currently standard atomic/ionic.
-        Tier 3: Geometric considerations are handled in _create_binary_prototypes.
-        """
-        if not self.has_pmg:
-             # Tier 2 Fallback (No pymatgen): ASE covalent radii
-             # Simple heuristic: for ions, covalent radii are often too large for cations
-             # and too small for anions, but we lack data to correct it properly without a table.
-             return covalent_radii[atomic_numbers[species_str]]
-
-        # Tier 1: Oxidation State Inference / Shannon Radii
-        if charge is not None:
-            try:
-                # Use Species class to get Shannon radius
-                # Using coordination number 6 ("VI") as a standard reference for rocksalt
-                sp = self.Species(species_str, oxidation_state=charge)
-                radius = sp.get_shannon_radius(cn="VI")
-                if radius:
-                    return radius
-            except Exception:
-                pass # Fall through to next tier
-
-        el = self.Element(species_str)
-
-        # Tier 2: Fallbacks
-
-        # 2a. Average ionic radius (if available in pymatgen data)
-        if el.average_ionic_radius:
-            return el.average_ionic_radius
-
-        # 2b. Atomic radius (often covalent)
-        r_atomic = el.atomic_radius
-        if r_atomic:
-            # Electronegativity correction could go here if we had a target structure context
-            # For now, we warn if we are deep in fallback territory for an ionic generator
-            logger.debug(f"Using atomic radius for {species_str} (fallback)")
-            return r_atomic
-
-        # 2c. Ultimate fallback
-        raise GenerationError(f"Could not determine radius for species {species_str}")
+    def _get_radius(self, species: str, charge: Optional[int] = None) -> float:
+        return self.strategy.get_radius(species, charge)
 
     def _generate_with_pymatgen(self) -> List[Atoms]:
         """
@@ -192,7 +203,7 @@ class IonicGenerator(BaseGenerator):
         radii_map = {}
         for el_str in elements:
             charge = oxidation_states.get(el_str)
-            radii_map[el_str] = self._get_heuristic_radius(el_str, charge)
+            radii_map[el_str] = self._get_radius(el_str, charge)
 
         logger.info(f"Using radii for generation: {radii_map}")
 

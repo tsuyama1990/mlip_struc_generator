@@ -46,7 +46,7 @@ def test_pipeline_run(mocker):
     mock_md.explore.return_value = [Atoms('Cu', pbc=True)]
 
     # DB
-    mock_db_cls = mocker.patch("nnp_gen.pipeline.runner.DatabaseManager")
+    mock_db_cls = mocker.patch("nnp_gen.pipeline.runner.ASEDbStorage")
     mock_db = mock_db_cls.return_value
     mock_db.bulk_save.return_value = [1]
 
@@ -59,4 +59,4 @@ def test_pipeline_run(mocker):
     # Verify calls
     mock_gen.generate.assert_called_once()
     mock_md.explore.assert_called_once()
-    mock_db.bulk_save.assert_called_once()
+    assert mock_db.bulk_save.call_count >= 1

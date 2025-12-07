@@ -34,7 +34,7 @@ class TestIonicGeometry:
 
         # Mock radii
         # R_A = 1.0, R_B = 2.0 -> Sum = 3.0
-        with patch.object(generator, '_get_heuristic_radius', side_effect=lambda s, c: 1.0 if s == "Na" else 2.0):
+        with patch.object(generator, '_get_radius', side_effect=lambda s, c: 1.0 if s == "Na" else 2.0):
 
             # Mock _pmg_to_ase to simply return an Atoms object with the cell
             # because we can't easily mock the complex pymatgen Structure logic fully
@@ -89,7 +89,7 @@ class TestIonicGeometry:
         generator.has_pmg = True
 
         # Mock _get_radius to return known radii
-        with patch.object(generator, '_get_heuristic_radius', side_effect=lambda s, c: 1.5 if s == "Na" else 0.5):
+        with patch.object(generator, '_get_radius', side_effect=lambda s, c: 1.5 if s == "Na" else 0.5):
             # Sum should be 2.0
             # Mock _create_binary_prototypes to capture the passed sum
             with patch.object(generator, '_create_binary_prototypes') as mock_create:

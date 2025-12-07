@@ -55,12 +55,20 @@ class StructureValidator:
         min_dist_threshold = self.constraints.min_distance
 
         try:
+            # i, j are indices of atoms, d is distance
             i, j, d = neighbor_list('ijd', atoms, cutoff=min_dist_threshold, self_interaction=False)
 
             if len(d) > 0:
-                min_found = np.min(d)
-                if min_found < min_dist_threshold:
-                    logger.warning(f"Validation Failed: Min distance {min_found:.2f} < {min_dist_threshold}")
+                # Find the worst violation
+                min_idx = np.argmin(d)
+                min_val = d[min_idx]
+                
+                if min_val < min_dist_threshold:
+                    # Get symbols for context
+                    sym1 = atoms[i[min_idx]].symbol
+                    sym2 = atoms[j[min_idx]].symbol
+                    
+                    logger.warning(f"Validation Failed: Overlap detected between {sym1}-{sym2} at {min_val:.3f} A (Threshold: {min_dist_threshold:.3f})")
                     return False
 
             return True
