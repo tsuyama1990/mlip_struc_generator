@@ -12,6 +12,7 @@ from nnp_gen.core.config import (
 from nnp_gen.web_ui.job_manager import JobManager
 from nnp_gen.generators.ionic import validate_element
 from ase.data import chemical_symbols
+from nnp_gen.core.physics import estimate_lattice_constant
 
 class ConfigViewModel(param.Parameterized):
     # --- System Type Selector ---
@@ -98,12 +99,15 @@ class ConfigViewModel(param.Parameterized):
 
         elements = [e.strip() for e in self.elements_input.split(",") if e.strip()]
         invalid = []
+        valid_elements = []
         for el in elements:
             try:
                 # Basic check, or use validate_element?
                 # Using chemical_symbols check directly to allow UI responsiveness without exceptions
                 if el.capitalize() not in chemical_symbols:
                     invalid.append(el)
+                else:
+                    valid_elements.append(el)
             except Exception:
                 invalid.append(el)
 
@@ -111,6 +115,14 @@ class ConfigViewModel(param.Parameterized):
              self.status_message = f"⚠️ Invalid elements: {', '.join(invalid)}"
         else:
              self.status_message = "Ready"
+             # Auto-estimate lattice constant for Alloy
+             if self.system_type == "alloy" and valid_elements:
+                 try:
+                     est_a = estimate_lattice_constant(valid_elements, structure='fcc') # Default/Fallback structure
+                     if est_a > 0:
+                         self.alloy_lattice_constant = round(est_a, 3)
+                 except Exception:
+                     pass
 
     def get_pydantic_config(self) -> AppConfig:
         """
