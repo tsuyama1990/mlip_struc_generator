@@ -1,32 +1,37 @@
-defaults:
-  - system: knowledge
-  - exploration: md
-  - sampling: fps
-  - _self_
-
 system:
   type: knowledge
+  # Complex doped system
   formula: "LiFe0.5Co0.5O2"
+
+  # Strategies
   use_cod: true
   use_prototypes: true
   use_symmetry_generation: true
-  max_supercell_atoms: 200
-  # BaseSystemConfig requirements
-  constraints:
-    max_atoms: 300
-    r_cut: 5.0
+
+  # Safety Constraints
+  max_supercell_atoms: 300  # Allow enough room for supercell ordering
+
+  # Optional: Explicitly list elements if you want to override auto-detection
+  # elements: ["Li", "Fe", "Co", "O"]
 
 exploration:
   method: md
-  model_name: mace
-  temperature: 300
-  steps: 100
-  timestep: 1.0
+  temperature: 600  # High temp to test stability
+  steps: 500
+  ensemble: nvt # Surface/Disordered systems are safer in NVT initially
+
+  # Enable MC to mix the Fe/Co dopants
+  mc_config:
+    enabled: true
+    swap_interval: 10
+    swap_pairs: [["Fe", "Co"]]
+    allow_charge_mismatch: false # Strict safety
 
 sampling:
   strategy: fps
-  n_samples: 10
+  n_samples: 50
   descriptor_type: soap
+  min_distance: 1.5
 
-output_dir: "output_knowledge_demo"
+output_dir: tutorials/06_knowledge_generation/output
 seed: 42
