@@ -5,7 +5,7 @@ from ase import Atoms
 from ase.build import bulk
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import AlloySystemConfig
-from nnp_gen.core.physics import estimate_lattice_constant
+from nnp_gen.core.physics import estimate_lattice_constant, apply_vacancies
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,10 @@ class AlloyGenerator(BaseGenerator):
         rng = np.random.RandomState(42)
         symbols = rng.choice(elements, size=n_atoms)
         atoms.set_chemical_symbols(symbols)
+
+        # Apply Vacancies
+        if self.config.vacancy_concentration > 0.0:
+            atoms = apply_vacancies(atoms, self.config.vacancy_concentration, rng)
 
         structures.append(atoms)
 

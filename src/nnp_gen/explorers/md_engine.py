@@ -2,14 +2,18 @@ import logging
 import concurrent.futures
 import numpy as np
 import time
-from typing import List, Optional, Dict, Any
+import random
+from typing import List, Optional, Dict, Any, Tuple
 from ase import Atoms
 from ase.md.langevin import Langevin
+from ase.md.npt import NPT
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase import units
 from ase.data import covalent_radii
 from tqdm import tqdm
 from nnp_gen.core.interfaces import IExplorer
+from nnp_gen.core.config import ExplorationConfig, MonteCarloConfig, EnsembleType, MCStrategy
+from nnp_gen.core.physics import detect_vacuum
 import psutil
 import multiprocessing
 import queue
@@ -73,13 +77,6 @@ class CalculatorPool:
         self.device = device
         self.size = size
 
-        # Pre-fill? Or lazy?
-        # Lazy is safer to avoid long startup.
-        # But we must ensure thread safety during creation if multiple threads hit empty queue.
-        # Actually, best pattern is:
-        # Workers try to get from queue. If empty and total created < size, create new.
-        # But queue.Queue doesn't track "total created".
-        # Simplest: Pre-fill.
         logger.info(f"Initializing CalculatorPool with {size} calculators ({model_name})...")
         for _ in range(size):
              calc = _get_calculator(model_name, device)
@@ -93,15 +90,212 @@ class CalculatorPool:
         finally:
             self.queue.put(calc)
 
+def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: float):
+    """
+    Factory to create the appropriate MD integrator (NVT/NPT).
+    """
+    timestep = expl_config.timestep * units.fs
+    ensemble = expl_config.ensemble
+
+    is_vacuum = detect_vacuum(atoms)
+
+    use_npt = False
+
+    if ensemble == EnsembleType.AUTO:
+        if is_vacuum:
+            logger.info("Vacuum/Slab detected: Using NVT (Langevin).")
+            use_npt = False
+        else:
+            logger.info("Bulk detected: Using NPT.")
+            use_npt = True
+    elif ensemble == EnsembleType.NPT:
+        if is_vacuum:
+            logger.warning("User forced NPT on a system with Vacuum. This may lead to infinite expansion.")
+        use_npt = True
+    else: # NVT
+        use_npt = False
+
+    if use_npt:
+        # NPT requires stress support.
+        # Pressure: default 0 (None in config implies 0 if NPT selected? Or we need pressure config)
+        pressure = expl_config.pressure if expl_config.pressure is not None else 0.0
+        # Convert GPa to internal units
+        # ASE units: GPa is not direct, but units.GPa exists.
+        # pressure * units.GPa
+        p_internal = pressure * units.GPa
+
+        # ttime: Characteristic time for thermostat (usually 20*dt)
+        # pfactor: Bulk modulus estimate * time^2.
+        # ASE NPT defaults are often sufficient but let's be explicit if needed.
+        # We stick to standard defaults for robustness.
+        ttime = 25 * units.fs
+        pfactor = 75**2 * units.fs**2 # Default-ish
+
+        # Check if calculator supports stress? ASE will raise error if not.
+        return NPT(atoms, timestep=timestep, temperature_K=current_temp, externalstress=p_internal, ttime=ttime, pfactor=pfactor)
+    else:
+        # NVT (Langevin)
+        friction = 0.002
+        return Langevin(atoms, timestep=timestep, temperature_K=current_temp, friction=friction)
+
+def _perform_mc_swap(atoms: Atoms, mc_config: MonteCarloConfig, temp: float, calc) -> bool:
+    """
+    Perform a Monte Carlo swap or vacancy hop.
+    Returns True if accepted, False otherwise.
+    """
+    if not mc_config.enabled:
+        return False
+
+    if temp <= 0:
+        return False
+
+    # Choose Strategy
+    strategy = random.choice(mc_config.strategy)
+
+    # Calculate initial energy
+    try:
+        e_old = atoms.get_potential_energy()
+    except Exception as e:
+        logger.warning(f"MC Energy calculation failed: {e}")
+        return False
+
+    accepted = False
+
+    # Save original positions/symbols to revert if rejected
+    # Deep copy is expensive? atoms.copy() is safer.
+    # But for just swapping 2 atoms, we can revert manually.
+    # For large displacement, manual revert is also easy.
+
+    indices_changed = []
+    original_positions = []
+    original_symbols = []
+
+    # --- STRATEGY A: VACANCY HOP (Smart Rattle) ---
+    if strategy == MCStrategy.VACANCY_HOP:
+        # Pick random atom
+        idx = random.randint(0, len(atoms) - 1)
+
+        # Large displacement (2.5 A) in random direction
+        # Why 2.5? Typical interatomic distance. Jumping to a neighbor site (void).
+        disp_mag = 2.5
+        direction = np.random.normal(size=3)
+        norm = np.linalg.norm(direction)
+        if norm < 1e-6:
+            return False # Fail safe
+        direction /= norm
+        displacement = direction * disp_mag
+
+        # Store old state
+        indices_changed = [idx]
+        original_positions = [atoms.positions[idx].copy()]
+
+        # Apply move
+        atoms.positions[idx] += displacement
+
+    # --- STRATEGY B: SWAP ---
+    elif strategy == MCStrategy.SWAP:
+        if not mc_config.swap_pairs:
+            return False
+
+        # Pick a pair type
+        pair_type = random.choice(mc_config.swap_pairs)
+        el1, el2 = pair_type
+
+        # Find indices
+        indices1 = [i for i, s in enumerate(atoms.get_chemical_symbols()) if s == el1]
+        indices2 = [i for i, s in enumerate(atoms.get_chemical_symbols()) if s == el2]
+
+        if not indices1 or not indices2:
+            return False # Cannot swap
+
+        idx1 = random.choice(indices1)
+        idx2 = random.choice(indices2)
+
+        if idx1 == idx2:
+            return False
+
+        # Safety Check: Charge
+        if atoms.has("initial_charges"):
+            charges = atoms.get_initial_charges()
+            q1 = charges[idx1]
+            q2 = charges[idx2]
+
+            if abs(q1 - q2) > 0.1 and not mc_config.allow_charge_mismatch:
+                logger.warning(f"Aliovalent swap rejected: {el1}({q1}) <-> {el2}({q2})")
+                return False
+
+        # Apply Swap (positions or symbols? Swapping positions is physically equivalent to swapping identity)
+        # Swapping identity (symbols/numbers) preserves geometry, checks if species fits better there.
+        # Usually MC swap means swapping species.
+
+        indices_changed = [idx1, idx2]
+        original_symbols = [atoms.symbols[idx1], atoms.symbols[idx2]]
+
+        # Swap symbols
+        atoms.symbols[idx1], atoms.symbols[idx2] = atoms.symbols[idx2], atoms.symbols[idx1]
+        # Also swap charges/magmoms if they exist?
+        # If we swap species, we imply the atom at position X changes identity.
+        # So its inherent properties (charge) should follow the species?
+        # Or does the ion move?
+        # If we swap Na+ and K+, the position at X becomes K+ (with K charge).
+        # So we should swap the aux arrays too.
+
+        if atoms.has("initial_charges"):
+            q = atoms.get_initial_charges()
+            q[idx1], q[idx2] = q[idx2], q[idx1]
+            atoms.set_initial_charges(q)
+
+        if atoms.has("initial_magmoms"):
+            m = atoms.get_initial_magnetic_moments()
+            m[idx1], m[idx2] = m[idx2], m[idx1]
+            atoms.set_initial_magnetic_moments(m)
+
+    # --- METROPOLIS ---
+    try:
+        e_new = atoms.get_potential_energy()
+        delta_e = e_new - e_old
+
+        if delta_e < 0:
+            accepted = True
+        else:
+            # Boltzmann
+            k_b = units.kB # eV/K
+            prob = np.exp(-delta_e / (k_b * temp))
+            if random.random() < prob:
+                accepted = True
+
+    except Exception as e:
+        logger.warning(f"MC New Energy calculation failed: {e}")
+        accepted = False
+
+    if accepted:
+        logger.info(f"MC {strategy} Accepted. dE = {delta_e:.4f} eV")
+        return True
+    else:
+        # Revert
+        if strategy == MCStrategy.VACANCY_HOP:
+            atoms.positions[indices_changed[0]] = original_positions[0]
+        elif strategy == MCStrategy.SWAP:
+            # Revert symbols
+            atoms.symbols[indices_changed[0]] = original_symbols[0]
+            atoms.symbols[indices_changed[1]] = original_symbols[1]
+            # Revert arrays
+            if atoms.has("initial_charges"):
+                q = atoms.get_initial_charges()
+                # Swap back
+                q[indices_changed[0]], q[indices_changed[1]] = q[indices_changed[1]], q[indices_changed[0]]
+                atoms.set_initial_charges(q)
+            if atoms.has("initial_magmoms"):
+                m = atoms.get_initial_magnetic_moments()
+                m[indices_changed[0]], m[indices_changed[1]] = m[indices_changed[1]], m[indices_changed[0]]
+                atoms.set_initial_magnetic_moments(m)
+
+        return False
+
 def run_single_md_thread(
     atoms: Atoms,
-    temp_start: float,
-    temp_end: float,
-    steps: int,
-    timestep_fs: float,
-    interval: int,
+    expl_config: ExplorationConfig,
     calc_pool: CalculatorPool,
-    calculator_params: Dict[str, Any],
     timeout_seconds: int = 3600
 ) -> Optional[List[Atoms]]:
     """
@@ -110,19 +304,30 @@ def run_single_md_thread(
     """
     start_time = time.time()
 
+    # Unpack config
+    steps = expl_config.steps
+    timestep_fs = expl_config.timestep
+
+    # Temp
+    if expl_config.temperature_mode == "gradient":
+        temp_start = expl_config.temp_start
+        temp_end = expl_config.temp_end
+    else:
+        temp_start = expl_config.temperature
+        temp_end = expl_config.temperature
+
+    mc_config = expl_config.mc_config
+
     try:
         with calc_pool.get_calculator() as calc:
-            # Clone atoms to avoid mutating the seed in place if shared (seeds are usually unique copies)
-            # atoms = atoms.copy() # Caller passes unique seed? Yes.
-
             atoms.calc = calc
 
             # Initialize velocities at start temperature
             MaxwellBoltzmannDistribution(atoms, temperature_K=temp_start)
             Stationary(atoms)
 
-            # Setup Dynamics
-            dyn = Langevin(atoms, timestep_fs * units.fs, temperature_K=temp_start, friction=0.002)
+            # Setup Dynamics via Factory
+            dyn = _get_integrator(atoms, expl_config, temp_start)
 
             trajectory = []
 
@@ -134,51 +339,92 @@ def run_single_md_thread(
             np.fill_diagonal(thresholds, 0.0)
 
             def step_check():
-                # Timeout check
                 if time.time() - start_time > timeout_seconds:
                     raise MDTimeoutError("MD Simulation timed out.")
-
                 try:
                     dists = atoms.get_all_distances(mic=True)
                     np.fill_diagonal(dists, np.inf)
-
                     min_d = np.min(dists)
                     if min_d < 0.5:
                         raise RuntimeError(f"Structure Exploded: min_dist {min_d:.2f} < 0.5")
-
                     if np.any(dists < thresholds):
                          raise RuntimeError("Structure Exploded: Atomic overlap detected")
-
-                except ValueError as e:
-                    logger.warning(f"MD Step Check Failed (ValueError): {e}")
+                except ValueError:
                     pass
-                except Exception as e:
-                    logger.error(f"MD Step Check Error: {e}")
-                    raise e
 
-            # Initial check
             step_check()
 
-            # Execute simulation in a loop to allow periodic timeout checks
-            for i in range(steps):
-                # Update Temperature for Gradient Mode
+            # --- HYBRID LOOP ---
+            # Chunking Logic
+
+            swap_interval = mc_config.swap_interval if (mc_config and mc_config.enabled) else steps
+            # Snapshot interval for output
+            snap_interval = max(1, steps // 50)
+
+            total_steps_done = 0
+
+            while total_steps_done < steps:
+                # Determine chunk size
+                # We need to stop for MC swap OR for snapshot?
+                # Actually, standard MD runs for X steps then snapshot.
+                # If MC is enabled, we need to stop every `swap_interval`.
+
+                # Smallest unit of work before we need to do *something* (Swap or Snap)
+                # But dyn.run(1) is slow.
+                # Let's run in chunks of min(swap_interval, remaining)
+
+                # Handling snapshots:
+                # Ideally we check snapshot logic every step, but for perf we want chunks.
+                # We can snapshot after the chunk.
+
+                chunk = min(swap_interval, steps - total_steps_done)
+                if chunk < 1:
+                    break
+
+                # Gradient Temp Update (at start of chunk, approx)
                 if abs(temp_end - temp_start) > 1e-6:
-                    current_t = temp_start + (temp_end - temp_start) * (i / steps)
+                    current_t = temp_start + (temp_end - temp_start) * (total_steps_done / steps)
                     dyn.set_temperature(temperature_K=current_t)
+                else:
+                    current_t = temp_start
 
-                dyn.run(1)
+                # Run MD Chunk
+                dyn.run(chunk)
+                total_steps_done += chunk
                 step_check()
-
-                if (i + 1) % interval == 0:
-                    snap = atoms.copy()
-                    snap.calc = None # Detach calculator
-                    trajectory.append(snap)
                 
-                # Progress logging every 10%
-                if steps >= 10 and (i + 1) % max(1, steps // 10) == 0:
-                    logger.info(f"MD Progress: {i + 1}/{steps}")
+                # Snapshot Logic
+                # If we crossed a multiple of snap_interval?
+                # Approx: just snapshot at end of chunk if enough time passed?
+                # Let's stick to strict interval logic:
+                # if total_steps_done % snap_interval == 0 (or close)
+                # Just appending at chunk end is fine if chunk size aligns.
+                # To be robust:
+                if total_steps_done % snap_interval < chunk:
+                     # e.g. interval 20, chunk 100.
+                     # 0->100. %20==0.
+                     snap = atoms.copy()
+                     snap.calc = None
+                     trajectory.append(snap)
 
-            atoms.calc = None # Detach before returning to pool logic (though 'calc' var is local)
+                # MC Logic
+                if mc_config and mc_config.enabled:
+                    # Trigger swap
+                    # Use current temp for MC acceptance
+                    mc_temp = mc_config.temp if mc_config.temp else current_t
+                    _perform_mc_swap(atoms, mc_config, mc_temp, calc)
+                    # Note: _perform_mc_swap updates atoms in-place.
+                    # Dynamics object 'dyn' holds reference to 'atoms'.
+                    # Does Langevin need reset if positions changed drastically?
+                    # Velocities are kept. Forces will be recalculated next step automatically by ASE.
+                    # However, if Vacuum Hop moves atom far, high potential energy -> high force -> acceleration.
+                    # This is physical (hot spot). Maybe we should thermalize velocities of moved atom?
+                    # For now, standard MC/MD hybrid just proceeds.
+
+                if steps >= 10 and total_steps_done % max(1, steps // 10) < chunk:
+                     logger.info(f"MD Progress: {total_steps_done}/{steps}")
+
+            atoms.calc = None
             return trajectory
 
     except MDTimeoutError:
@@ -186,9 +432,6 @@ def run_single_md_thread(
         return None
     except RuntimeError as e:
         logger.warning(f"MD Exploration Failed (RuntimeError): {e}")
-        return None
-    except TimeoutError as e:
-        logger.error(f"MD Exploration Timeout: {e}")
         return None
     except Exception as e:
         logger.error(f"MD Exploration Error: {e}")
@@ -202,9 +445,6 @@ def _calculate_max_workers(n_atoms_estimate: int = 1000) -> int:
     try:
         mem = psutil.virtual_memory()
         available_ram_mb = mem.available / (1024 * 1024)
-        # Using ThreadPool, memory per worker is lower (model shared).
-        # But we still have trajectories.
-        # Let's keep conservative estimate.
         mem_per_worker_mb = 200 + (n_atoms_estimate * 0.001)
         max_workers_mem = int(available_ram_mb / mem_per_worker_mb)
     except Exception:
@@ -225,30 +465,18 @@ class MDExplorer(IExplorer):
 
         # Prepare params
         expl = self.config.exploration
-        steps = expl.steps
-        timestep_fs = expl.timestep
-        interval = max(1, steps // 50)
         
-        # Determine Temperature Constraints
-        if expl.temperature_mode == "gradient":
-             start_t = expl.temp_start
-             end_t = expl.temp_end
-        else:
-             start_t = expl.temperature
-             end_t = expl.temperature
-
         # Determine max workers
         if n_workers is None:
             n_atoms = len(seeds[0]) if seeds else 1000
             n_workers = _calculate_max_workers(n_atoms)
 
-        logger.info(f"Starting MD Exploration with {n_workers} threads. Temp: {start_t}->{end_t} K, dt={timestep_fs} fs")
+        logger.info(f"Starting MD Exploration with {n_workers} threads. Method: {expl.method}")
 
         model_name = expl.model_name
-        device = "cpu" # or from config
+        device = "cpu"
 
         # Initialize Calculator Pool
-        # Pool size = n_workers
         pool = CalculatorPool(model_name, device, size=n_workers)
 
         # Use ThreadPoolExecutor
@@ -256,7 +484,7 @@ class MDExplorer(IExplorer):
             futures = []
             for seed in seeds:
                 futures.append(
-                    executor.submit(run_single_md_thread, seed, start_t, end_t, steps, timestep_fs, interval, pool, {}, 3600)
+                    executor.submit(run_single_md_thread, seed, expl, pool, 3600)
                 )
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(seeds), desc="MD Exploration"):

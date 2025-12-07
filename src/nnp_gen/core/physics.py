@@ -232,3 +232,106 @@ def estimate_lattice_constant(elements: List[str], structure: str = "fcc") -> fl
         return 3.6 # Generic fallback
         
     return float(np.mean(lattice_constants))
+
+def detect_vacuum(atoms: Atoms, threshold: float = 5.0) -> bool:
+    """
+    Detect if the system has vacuum (is a slab, wire, or cluster) or is fully bulk.
+
+    Logic:
+    1. If any PBC is False -> Vacuum (Slab/Wire/Cluster).
+    2. If all PBC are True -> Check for gaps in atomic distribution along axes.
+       Projects positions onto each axis and checks for empty space > threshold.
+
+    Args:
+        atoms (Atoms): Structure to check.
+        threshold (float): Minimum gap size in Angstroms to consider as vacuum.
+
+    Returns:
+        bool: True if vacuum is detected.
+    """
+    if any(not p for p in atoms.pbc):
+        return True
+
+    # Histogram check for bulk vacuum (e.g. a slab manually created inside a periodic box)
+    # We check each dimension by looking at gaps in sorted coordinates.
+
+    positions = atoms.get_positions()
+    cell = atoms.get_cell()
+
+    for i in range(3):
+        L = np.linalg.norm(cell[i])
+
+        # If cell dimension is smaller than threshold, it can't contain a vacuum of that size
+        if L < threshold:
+            continue
+
+        coords = positions[:, i]
+        # Sort coordinates
+        coords_sorted = np.sort(coords)
+
+        # Calculate gaps
+        gaps = np.diff(coords_sorted)
+        max_internal_gap = np.max(gaps) if len(gaps) > 0 else 0
+
+        # Check periodic gap (wrap around)
+        # Gap between last atom and first atom across boundary
+        # Note: positions are not wrapped, so last - first could be large if atoms are spread out,
+        # but we care about the empty space in the periodic box.
+        # Ideally, we map to [0, L] first.
+        # But even simpler: L - (max - min) roughly if one cluster? No.
+
+        # Correct Periodic Gap: (L - coords_sorted[-1]) + coords_sorted[0]
+        # This assumes coords are in [0, L]. If they are outside, we should wrap them first.
+        # But wrapping might split a molecule.
+
+        # Let's rely on standard ASE wrap to be safe
+        # Create a copy to not modify original
+        temp_atoms = atoms.copy()
+        temp_atoms.wrap()
+        wrapped_coords = np.sort(temp_atoms.positions[:, i])
+
+        wrapped_gaps = np.diff(wrapped_coords)
+        max_wrapped_gap = np.max(wrapped_gaps) if len(wrapped_gaps) > 0 else 0
+
+        periodic_gap = (L - wrapped_coords[-1]) + wrapped_coords[0]
+
+        if max(max_wrapped_gap, periodic_gap) > threshold:
+            return True
+
+    return False
+
+def apply_vacancies(atoms: Atoms, concentration: float, rng: np.random.RandomState) -> Atoms:
+    """
+    Randomly remove atoms to create vacancies.
+
+    Args:
+        atoms (Atoms): Structure to modify.
+        concentration (float): Fraction of atoms to remove (0.0 to 1.0).
+        rng (np.random.RandomState): Random number generator.
+
+    Returns:
+        Atoms: Modified structure (in-place usually, but returned).
+    """
+    if concentration <= 0.0:
+        return atoms
+
+    n_atoms = len(atoms)
+    n_vacancies = int(n_atoms * concentration)
+
+    if n_vacancies == 0:
+        return atoms
+
+    if n_vacancies >= n_atoms:
+        # Should not happen given constraints, but safety check
+        return atoms
+
+    # Select indices to remove
+    indices_to_remove = rng.choice(n_atoms, size=n_vacancies, replace=False)
+
+    # Sort indices in descending order to avoid index shift issues during pop (if looping)
+    # But ASE del atoms[indices] works if list/array provided?
+    # ASE del atoms[[1, 5]] works.
+
+    del atoms[indices_to_remove]
+
+    return atoms

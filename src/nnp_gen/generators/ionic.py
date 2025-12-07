@@ -6,6 +6,7 @@ from ase.build import bulk
 from ase.data import covalent_radii, atomic_numbers, chemical_symbols
 from nnp_gen.core.interfaces import BaseGenerator
 from nnp_gen.core.config import IonicSystemConfig
+from nnp_gen.core.physics import apply_vacancies
 from nnp_gen.core.exceptions import GenerationError
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,35 @@ class IonicGenerator(BaseGenerator):
         if not structures:
              raise GenerationError("No structures could be generated with the current configuration.")
 
-        return structures
+        # Apply Post-Processing: Vacancies and Charges
+        rng = np.random.RandomState(42) # Should use structured seed if possible, but consistent 42 for now in impl
+
+        final_structures = []
+        for atoms in structures:
+            # 1. Set Initial Charges
+            self._set_initial_charges(atoms)
+
+            # 2. Apply Vacancies
+            if self.config.vacancy_concentration > 0.0:
+                atoms = apply_vacancies(atoms, self.config.vacancy_concentration, rng)
+
+            final_structures.append(atoms)
+
+        return final_structures
+
+    def _set_initial_charges(self, atoms: Atoms):
+        """
+        Set initial charges on atoms based on oxidation states.
+        """
+        charges = []
+        oxi_states = self.config.oxidation_states
+
+        for atom in atoms:
+            sym = atom.symbol
+            q = oxi_states.get(sym, 0.0)
+            charges.append(q)
+
+        atoms.set_initial_charges(charges)
 
     def _get_heuristic_radius(self, species_str: str, charge: Optional[int] = None) -> float:
         """
