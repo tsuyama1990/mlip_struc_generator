@@ -1672,6 +1672,7 @@ source = { editable = "." }
 dependencies = [
     { name = "ase" },
     { name = "hydra-core" },
+    { name = "mace-torch" },
     { name = "numpy" },
     { name = "panel" },
     { name = "param" },
@@ -1743,6 +1744,7 @@ requires-dist = [
     { name = "hydra-core" },
     { name = "icet", marker = "extra == 'all'" },
     { name = "icet", marker = "extra == 'alloy'" },
+    { name = "mace-torch", specifier = ">=0.3.14" },
     { name = "mace-torch", marker = "extra == 'all'" },
     { name = "mace-torch", marker = "extra == 'ml-calculators'" },
     { name = "matgl", marker = "extra == 'all'" },

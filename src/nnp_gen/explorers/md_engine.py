@@ -110,6 +110,9 @@ def run_single_md_process(
 
     mc_config = expl_config.mc_config
 
+    if any(atoms.pbc):
+         atoms.wrap()
+
     try:
         # Instantiate Calculator Locally
         calc = _get_calculator(model_name, device)
@@ -131,6 +134,13 @@ def run_single_md_process(
                   logger.warning("Cannot run Langevin dynamics on a single atom due to ASE limitations. Returning initial structure.")
                   atoms.calc = None
                   return [atoms]
+
+        if any(atoms.pbc):
+             # MACE (and some other MLIPs) require atoms to be strictly within the unit cell.
+             # We attach a wrapper to ensure this at every step.
+             def wrap_atoms():
+                  atoms.wrap()
+             dyn.attach(wrap_atoms, interval=1)
 
         radii = covalent_radii[atoms.numbers]
         sum_radii = radii[:, None] + radii[None, :]
@@ -257,6 +267,22 @@ class MDExplorer(IExplorer):
         if n_workers is None:
             n_atoms = len(seeds[0]) if seeds else 1000
             n_workers = _calculate_max_workers(n_atoms)
+
+        # Pre-flight check: Verify calculator is available on this machine/environment
+        # This prevents spawning workers that will immediately crash if the module is missing.
+        try:
+            # We construct a dummy kwargs to test the build function
+            # We don't need to actually load the model weights (which might be slow), just check if the module imports.
+            # However, our CalculatorFactory.get() calls the builder immediately.
+            # A safer check is to verify if we can import the module required by the builder?
+            # Or just try to instantiate it and catch the error.
+            # Since loading might be heavy, let's try a lighter check if possible, OR just trust the first one fails fast.
+            # Actually, failing fast here is exactly what we want.
+            logger.info(f"Verifying calculator '{model_name}' availability...")
+            _get_calculator(model_name, "cpu") # Force CPU for check to avoid memory spikes
+        except Exception as e:
+            logger.error(f"Calculator check failed: {e}")
+            raise RuntimeError(f"Cannot start exploration: Calculator '{model_name}' failed to initialize. Error: {e}")
 
         logger.info(f"Starting MD Exploration with {n_workers} processes. Method: {expl.method} on {device}")
 

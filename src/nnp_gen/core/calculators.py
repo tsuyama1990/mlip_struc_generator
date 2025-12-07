@@ -32,9 +32,7 @@ def build_mace(device: str, kwargs: Dict[str, Any]) -> Calculator:
         model_type = kwargs.get('model_paths', 'small')
         return mace_mp(model=model_type, device=device, default_dtype="float32")
     except ImportError:
-         logger.warning("mace_mp not found. Falling back to MACECalculator.")
-         from mace.calculators import MACECalculator
-         return MACECalculator(model_paths=kwargs.get('model_paths', 'small'), device=device, default_dtype="float32")
+         raise ImportError("The 'mace' package is not installed. Please install it using 'pip install mace-torch'.")
 
 def build_sevenn(device: str, kwargs: Dict[str, Any]) -> Calculator:
     from sevenn.calculators import SevenNetCalculator
