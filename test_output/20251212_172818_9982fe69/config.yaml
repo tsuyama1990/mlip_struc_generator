@@ -1,0 +1,68 @@
+system:
+  elements:
+  - Fe
+  constraints:
+    max_atoms: 100
+    min_density: 0.0
+    min_distance: 0.5
+    min_cell_length_factor: 1.0
+    r_cut: 5.0
+  pbc:
+  - true
+  - true
+  - true
+  rattle_std: 0.01
+  vol_scale_range:
+  - 0.95
+  - 1.05
+  strict_mode: true
+  type: alloy
+  lattice_constant: null
+  lattice_estimation_method: max
+  spacegroup: null
+  supercell_size:
+  - 1
+  - 1
+  - 1
+  n_initial_structures: 1
+  n_surface_samples: 0
+  composition_mode: random
+  composition_ranges: null
+  default_magmoms: null
+  vacancy_concentration: 0.0
+exploration:
+  method: md
+  model_name: emt
+  device: cpu
+  temperature_mode: constant
+  temperature: 300.0
+  temp_start: null
+  temp_end: null
+  pressure: null
+  ttime: 100.0
+  steps: 10
+  timestep: 1.0
+  snapshot_interval: 100
+  execution_timeout: 3600
+  thermostat: LANGEVIN
+  ensemble: AUTO
+  mc_config:
+    enabled: false
+    strategy:
+    - SWAP
+    swap_interval: 100
+    swap_pairs: null
+    vacancy_hop_elements: null
+    allow_charge_mismatch: false
+    temp: null
+  zbl_config:
+    enabled: false
+    cutoff: 1.5
+    skin: 0.5
+sampling:
+  strategy: random
+  n_samples: 5
+  descriptor_type: soap
+  min_distance: 1.5
+output_dir: test_output/20251212_172818_9982fe69
+seed: 42

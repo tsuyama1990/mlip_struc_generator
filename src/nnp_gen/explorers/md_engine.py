@@ -406,6 +406,22 @@ def run_single_md_process(
                 dyn.run(chunk)
                 if progress_queue is not None:
                      progress_queue.put(chunk)
+            except RuntimeError as e:
+                # Handle MACE PBC error or similar: "Some input data are greater than the size of the periodic box"
+                if "periodic box" in str(e):
+                    logger.warning("MACE PBC Error detected. Wrapping atoms and retrying.")
+                    atoms.wrap()
+                    # Retry once
+                    try:
+                        dyn.run(chunk)
+                        if progress_queue is not None:
+                             progress_queue.put(chunk)
+                    except Exception as retry_err:
+                        # If retry fails, fail hard
+                        logger.error(f"Retry failed: {retry_err}")
+                        raise retry_err
+                else:
+                    raise e
             except Exception as e:
                 # ... (existing error handling) ...
                 raise e

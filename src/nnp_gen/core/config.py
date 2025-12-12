@@ -362,7 +362,22 @@ class FileSystemConfig(BaseSystemConfig):
     format: Optional[str] = Field(None, description="File format (e.g. 'cif', 'xyz'). Automatic if None.")
     recursive: bool = Field(False, description="Recursively search directories")
     pattern: str = Field("*", description="Glob pattern for filtering files")
-    repeat: int = Field(1, description="Duplicate structures N times")
+    repeat: int = Field(1, ge=1, description="Duplicate structures N times")
+    vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
+
+    @field_validator('repeat')
+    @classmethod
+    def validate_repeat(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("repeat must be at least 1")
+        return v
+
+    @field_validator('vacancy_concentration')
+    @classmethod
+    def validate_vacancy_concentration(cls, v: float) -> float:
+        if not (0.0 <= v <= 0.25):
+            raise ValueError("vacancy_concentration must be between 0.0 and 0.25")
+        return v
     
     # Base constraints apply strict checks
 

@@ -8,7 +8,7 @@ from nnp_gen.core.config import (
     MonteCarloConfig,
     MCStrategy,
     EnsembleType,
-    UserFileSystemConfig
+    FileSystemConfig
 )
 from nnp_gen.core.physics import detect_vacuum
 from nnp_gen.explorers.md_engine import _get_integrator
@@ -154,7 +154,8 @@ def test_file_generator_vacancies(tmp_path):
     atoms.write(fpath)
 
     # Config
-    config = UserFileSystemConfig(
+    config = FileSystemConfig(
+        type="from_files",
         elements=["Cu"],
         path=str(fpath),
         vacancy_concentration=0.1,
@@ -173,7 +174,8 @@ def test_file_generator_vacancies(tmp_path):
 
 def test_user_file_validation_failure():
     with pytest.raises(ValidationError) as excinfo:
-        UserFileSystemConfig(
+        FileSystemConfig(
+            type="from_files",
             elements=["Cu"],
             path="dummy.cif",
             repeat=0 # Invalid, must be >= 1
@@ -181,7 +183,8 @@ def test_user_file_validation_failure():
     assert "repeat" in str(excinfo.value)
 
     with pytest.raises(ValidationError) as excinfo:
-         UserFileSystemConfig(
+         FileSystemConfig(
+            type="from_files",
             elements=["Cu"],
             path="dummy.cif",
             vacancy_concentration=0.5 # Invalid, > 0.25
@@ -214,7 +217,7 @@ def test_app_config_integration():
         exploration=ExplorationConfig(
             method="hybrid_mc_md",
             ensemble=EnsembleType.AUTO,
-            mc_config=MonteCarloConfig(enabled=True)
+            mc_config=MonteCarloConfig(enabled=True, swap_pairs=[("Na", "Cl")], allow_charge_mismatch=True)
         ),
         sampling=SamplingConfig(),
         output_dir="test_out",

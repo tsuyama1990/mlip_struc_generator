@@ -24,7 +24,10 @@ def test_md_explorer_process_pool(tmp_path):
         ensemble=EnsembleType.NVT,
         pressure=None,
         mc_config=MonteCarloConfig(enabled=False),
-        device="cpu"
+        device="cpu",
+        zbl_config=None,
+        thermostat="langevin",
+        snapshot_interval=1,
     )
 
     app_config = MockConfig(exploration=expl_config)
