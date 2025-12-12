@@ -9,6 +9,9 @@ from nnp_gen.generators.adsorption import VacuumAdsorbateGenerator, SolventAdsor
 from nnp_gen.generators.file_loader import FileGenerator
 from typing import Optional
 from nnp_gen.generators.knowledge import KnowledgeBasedGenerator
+from nnp_gen.generators.mixed import MixedGenerator
+from nnp_gen.generators.random_gen import RandomGenerator
+from nnp_gen.generators.designated import DesignatedGenerator
 
 class GeneratorFactory:
     """
@@ -43,9 +46,16 @@ class GeneratorFactory:
             return VacuumAdsorbateGenerator(config, seed=seed)
         elif config.type == "solvent_adsorbate":
             return SolventAdsorbateGenerator(config, seed=seed)
-        elif config.type == "user_file":
+        elif config.type == "from_files": # Old 'user_file' logic, updated name
+            # FileGenerator supports recursive/pattern now? Need to check file_loader.py
             return FileGenerator(config, seed=seed)
         elif config.type == "knowledge":
             return KnowledgeBasedGenerator(config, seed=seed)
+        elif config.type == "mixed":
+            return MixedGenerator(config, seed=seed)
+        elif config.type == "random":
+            return RandomGenerator(config, seed=seed)
+        elif config.type == "designated":
+            return DesignatedGenerator(config, seed=seed)
         else:
             raise ValueError(f"Unknown system type: {config.type}")

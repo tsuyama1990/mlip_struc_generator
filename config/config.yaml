@@ -1,30 +1,191 @@
+
+# Main Configuration File for MLIP Structure Generator
+# This file serves as a reference for all available options.
+
 output_dir: output
 seed: 42
 
+# -----------------------------------------------------------------------------
+# System Configuration
+# Choose ONE of the following system types by uncommenting the block.
+# -----------------------------------------------------------------------------
+
+  # 2. Ionic System (e.g. Oxides)
+  # -----------------------------
+  # type: ionic
+  # elements: [Mg, O]
+  # oxidation_states: {Mg: 2, O: -2}
+  # n_initial_structures: 1   # Generates N variants
+  # n_surface_samples: 0      # Optional: Auto-generate surfaces
+  # supercell_size: [2, 2, 2] # Optional expansion
+
+  # 3. Covalent System (e.g. Carbon/Si)
+  # -----------------------------------
+  # type: covalent
+  # elements: [C]
+  # dimensionality: 3 # 1, 2, or 3
+  # n_initial_structures: 5
+  # n_surface_samples: 2 # Generates surfaces from the random bulks
+  # supercell_size: [2, 2, 2]
+
+  # 4. Random / High-Entropy Alloy
+  # ------------------------------
 system:
-  type: alloy
-  elements: [Cu, Au]
+  type: random
+  elements: [Fe, Ni, Cr]
+  n_initial_structures: 20
+  n_surface_samples: 2
+  
+  # Optional: Composition Logic
+  composition_mode: range # random, balanced, range
+  composition_ranges:
+     Fe: [0.6, 0.8]
+     Ni: [0.1, 0.2]
+     Cr: [0.1, 0.2]
+
+  lattice_constant_range: [3.5, 4.0]
+  spacegroup_mode: random_list
+  spacegroups: [225, 229]
+  supercell_size: [3, 3, 3]
+  lattice_estimation_method: max
+  
+  # Target spacegroup (1-230). 225 is FCC-like.
+  spacegroup: 225
+  
+  supercell_size: [3, 3, 3]
+  
+  # Physics constraints
   constraints:
     max_atoms: 200
-    min_density: 1.0
-    min_distance: 2.0
+    min_density: 5.0
+    min_distance: 1.8         # Min distance between atoms
     min_cell_length_factor: 1.0
-    r_cut: 5.0
-  pbc: [true, true, true]
-  rattle_std: 0.01
-  vol_scale_range: [0.95, 1.05]
-  lattice_constant: 3.8
-  spacegroup: 225
-  supercell_size: [2, 2, 2]
+    r_cut: 4.0
+  
+  # General settings
+  pbc: [true, true, true]   # Periodic Boundary Conditions
+  rattle_std: 0.05          # Initial position noise
+  vol_scale_range: [0.95, 1.05] # Volume scaling for data augmentation
+  
+  # Initial Magnetism (Bohr magneton)
+  default_magmoms:
+    Fe: 3.0
+    Pt: 0.0
 
+# --- OPTION 2: Knowledge-Based (Exact Composition/Prototype) ---
+# system:
+#   type: knowledge
+#   formula: "Fe3Pt"       # Chemical formula
+#   use_cod: true          # Search Crystallography Open Database
+#   use_materials_project: false # Search Materials Project (requires API key)
+#   # mp_api_key: "YOUR_KEY_HERE"
+#   use_prototypes: true   # Fallback to anonymous prototypes (e.g., A3B)
+#   use_symmetry_generation: true # Fallback to random symmetry generation
+#   max_supercell_atoms: 200
+#   pbc: [true, true, true]
+#   rattle_std: 0.01
+
+# --- OPTION 3: Surface / Slab (Vacuum Adsorbate) ---
+# system:
+#   type: vacuum_adsorbate
+#   
+#   # The bulk material definition
+#   substrate:
+#     type: alloy
+#     elements: [Cu, Au]
+#     lattice_constant: 3.8
+#     spacegroup: 225
+#
+#   # Surface parameters
+#   miller_indices: [1, 1, 1]  # Cleavage plane
+#   layers: 4                  # Number of atomic layers
+#   vacuum: 10.0               # Vacuum size in Angstrom
+#   defect_rate: 0.1           # 10% vacancies on the surface layer
+#
+#   # Optional: Adsorbates on surface
+#   adsorbates:
+#     - source: "CO"           # Molecule formula or SMILES
+#       mode: "smiles"
+#       count: 2
+#       height: 2.0
+
+# --- OPTION 4: Ionic (Oxidation States) ---
+# system:
+#   type: ionic
+#   elements: [Li, O]
+#   oxidation_states:
+#     Li: 1
+#     O: -2
+#   charge_balance_tolerance: 0.0
+#   supercell_size: [2, 2, 2]
+
+# --- OPTION 5: Interface (Heterostructure) ---
+# system:
+#   type: interface
+#   mode: hetero_crystal # or solid_liquid
+#   
+#   phase_a: 
+#     type: alloy
+#     elements: [Au]
+#     lattice_constant: 4.08
+#   
+#   phase_b:
+#     type: alloy
+#     elements: [Ag]
+#     lattice_constant: 4.09
+#   
+#   vacuum: 15.0
+#   interface_distance: 2.5
+#   max_mismatch: 0.05
+
+# -----------------------------------------------------------------------------
+# Exploration Configuration (MD / Monte Carlo)
+# -----------------------------------------------------------------------------
 exploration:
-  method: md
-  temperature: 300
-  steps: 50
-  timestep: 1.0
+  method: md  # Options: md, mc, hybrid_mc_md, melt_quench
+  model_name: mace # Options: mace, sevenn, emt
+  device: cuda # Options: cpu, cuda
+  
+  # Temperature control
+  temperature_mode: constant # or 'gradient'
+  temperature: 1500 # Kelvin (Active Learning usually requires high temp)
+  # temp_start: 300
+  # temp_end: 2000
+  
+  # Pressure control (None = NVT, Value = NPT)
+  pressure: null # e.g., 0.0 for ambient pressure
+  
+  # Timing
+  steps: 1000
+  timestep: 1.0 # fs
+  snapshot_interval: 100 # Save structure every N steps
+  
+  # --- Monte Carlo Configuration (Hybrid MD/MC) ---
+  # Enable this to swap atoms during MD (good for alloys)
+  mc_config:
+    enabled: false
+    strategy: [SWAP] # Options: SWAP, VACANCY_HOP
+    swap_interval: 50 # Try swaps every 50 MD steps
+    # swap_pairs: [[Fe, Pt]] # Optional restriction
+    allow_charge_mismatch: false
+    temp: 2000 # MC temperature (can be different from MD)
 
+# -----------------------------------------------------------------------------
+# Sampling Configuration
+# How to select diverse structures from the generated trajectories
+# -----------------------------------------------------------------------------
 sampling:
-  strategy: random
-  n_samples: 5
-  descriptor_type: soap
-  min_distance: 1.5
+  strategy: random # Options: fps (farthest point sampling), random
+  n_samples: 50
+  descriptor_type: soap # For FPS: soap or ace
+  min_distance: 1.5     # Minimum atomic distance pre-filter
+
+# -----------------------------------------------------------------------------
+# System Internal Config
+# -----------------------------------------------------------------------------
+hydra:
+  run:
+    dir: ${output_dir}
+  job:
+    chdir: true
+  output_subdir: .hydra # Store hydra logs in hidden .hydra dir inside output_dir

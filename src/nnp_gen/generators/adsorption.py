@@ -60,47 +60,39 @@ class VacuumAdsorbateGenerator(BaseGenerator):
         for bulk_atoms in bulks:
             # 2. Loop over miller indices
             for miller in self.config.miller_indices:
-                try:
-                    # Create surface
-                    # ase.build.surface adds vacuum on both sides? No, it creates a slab with vacuum.
-                    # vacuum parameter is "size of vacuum on both sides" or "total vacuum"?
-                    # ASE docs: "vacuum: float. thickness of vacuum layer on each side of the slab."
-                    # We usually want vacuum on top (z-direction).
-                    # But ase.build.surface centers the slab.
-                    # We will center it later or accept it.
-                    slab = surface(bulk_atoms, miller, layers=self.config.layers, vacuum=self.config.vacuum)
+                
+                # Loop for multiple random realizations (defects, adsorbates)
+                for i in range(self.config.n_initial_structures):
+                    try:
+                        # Create surface
+                        # ase.build.surface centers the slab.
+                        slab = surface(bulk_atoms, miller, layers=self.config.layers, vacuum=self.config.vacuum)
 
-                    # Ensure the slab is centered and vacuum is correct?
-                    # ase.build.surface puts vacuum/2 on bottom and vacuum/2 on top.
-                    # We want all vacuum on top?
-                    # Usually for surface science we want slab at bottom, vacuum on top.
-                    slab.center(vacuum=self.config.vacuum, axis=2)
-                    # Wait, center(vacuum=v) sets total vacuum to v?
-                    # "vacuum: If specified, the atomic structure is centered in the unit cell with a vacuum of this size on both sides (in Angstroms)."
-                    # We want to just put the atoms at the bottom.
-                    # Let's just use what surface gives, but make sure we have enough Z.
+                        # We put atoms at the bottom?
+                        slab.center(vacuum=self.config.vacuum, axis=2)
+                        
+                        # 3. Expand supercell (min_width >= 10.0)
+                        self._expand_supercell(slab, min_width=10.0)
 
-                    # 3. Expand supercell (min_width >= 10.0)
-                    self._expand_supercell(slab, min_width=10.0)
+                        # 4. Defects
+                        # Use different seeds for each realization
+                        if self.config.defect_rate > 0:
+                            # Pass unique seed/salt based on loop index
+                            self._apply_defects(slab, salt=i)
 
-                    # 4. Defects
-                    if self.config.defect_rate > 0:
-                        self._apply_defects(slab)
+                        # 5. Adsorbates
+                        if self.config.adsorbates:
+                            self._apply_adsorbates(slab, salt=i)
 
-                    # 5. Adsorbates
-                    if self.config.adsorbates:
-                        self._apply_adsorbates(slab)
+                        # 6. Constraints
+                        self._apply_constraints(slab)
 
-                    # 6. Constraints
-                    self._apply_constraints(slab)
+                        surfaces.append(slab)
 
-                    surfaces.append(slab)
-
-                except Exception as e:
-                    logger.warning(f"Failed to generate surface {miller} for bulk: {e}")
-                    # raise e # Debug
-                    continue
-
+                    except Exception as e:
+                        logger.warning(f"Failed to generate surface {miller} for bulk (iter {i}): {e}")
+                        continue
+        
         return surfaces
 
     def _expand_supercell(self, atoms: Atoms, min_width: float):
@@ -112,7 +104,7 @@ class VacuumAdsorbateGenerator(BaseGenerator):
         if nx > 1 or ny > 1:
             atoms *= (nx, ny, nz)
 
-    def _apply_defects(self, atoms: Atoms):
+    def _apply_defects(self, atoms: Atoms, salt: int = 0):
         pos = atoms.get_positions()
         if len(pos) == 0:
             return
@@ -130,7 +122,7 @@ class VacuumAdsorbateGenerator(BaseGenerator):
             return
 
         # Deterministic random based on structure
-        seed_str = f"defects_{atoms.get_chemical_formula()}_{len(atoms)}"
+        seed_str = f"defects_{atoms.get_chemical_formula()}_{len(atoms)}_{salt}"
         seed_hash = hashlib.sha256(seed_str.encode('utf-8')).hexdigest()
         seed = int(seed_hash, 16) % (2**32)
         rng = np.random.RandomState(seed)
@@ -168,8 +160,8 @@ class VacuumAdsorbateGenerator(BaseGenerator):
         else:
             raise GenerationError(f"Unknown mode {config.mode}")
 
-    def _apply_adsorbates(self, atoms: Atoms):
-        seed_str = f"adsorbates_{atoms.get_chemical_formula()}_{len(atoms)}"
+    def _apply_adsorbates(self, atoms: Atoms, salt: int = 0):
+        seed_str = f"adsorbates_{atoms.get_chemical_formula()}_{len(atoms)}_{salt}"
         seed_hash = hashlib.sha256(seed_str.encode('utf-8')).hexdigest()
         seed = int(seed_hash, 16) % (2**32)
         rng = np.random.RandomState(seed)

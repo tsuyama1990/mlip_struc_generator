@@ -2,16 +2,17 @@ import os
 import uuid
 import logging
 import threading
-import concurrent.futures
+import subprocess
+import shutil
+import sys
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from omegaconf import OmegaConf
 
 from nnp_gen.core.config import AppConfig
-from nnp_gen.pipeline.runner import PipelineRunner
-from nnp_gen.web_ui.utils import log_capture_to_file
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class JobInfo(BaseModel):
     log_file_path: str
     output_dir: str
     error_message: Optional[str] = None
+    pid: Optional[int] = None
 
 class JobManager:
     _instance = None
@@ -46,16 +48,19 @@ class JobManager:
         if self._initialized:
             return
 
-        # Using ThreadPoolExecutor as MDExplorer uses ProcessPoolExecutor internally.
-        # Daemon processes cannot spawn children, so we must use threads here.
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.jobs: Dict[str, JobInfo] = {}
-        self._jobs_lock = threading.RLock() # Use RLock for internal safety
+        self._jobs_lock = threading.RLock()
         self._initialized = True
 
-        # Determine logs directory relative to where running
+        # Determine logs directory
         self.logs_root = Path("logs")
         self.logs_root.mkdir(exist_ok=True)
+        
+        # Start a background thread to monitor processes? 
+        # For simplicity, we might just poll status when requested, or use a waiter thread per job.
+        # Since we want real-time logs, we can just let the subprocess write to file 
+        # and we read that file. We do need to know when it finishes.
+        # We can use a thread per job to wait().
 
     def submit_job(self, config: AppConfig) -> str:
         """
@@ -67,84 +72,129 @@ class JobManager:
         # Isolate output directory
         base_output = Path(config.output_dir)
         effective_output_dir = base_output / job_id
+        effective_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Clone config (Pydantic models are mutable, but we want a copy for safety)
-        # Assuming config.model_copy(deep=True) works in Pydantic V2
         job_config = config.model_copy(deep=True)
         job_config.output_dir = str(effective_output_dir)
 
-        log_file = self.logs_root / f"{job_id}.log"
+        # Write config.yaml
+        config_path = effective_output_dir / "config.yaml"
+        # Use OmegaConf to dump Pydantic model to YAML
+        # Convert to container first
+        cfg_container = OmegaConf.create(job_config.model_dump())
+        with open(config_path, 'w') as f:
+            OmegaConf.save(cfg_container, f)
+
+        log_file_path = self.logs_root / f"{job_id}.log"
 
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
             start_time=datetime.now(),
-            log_file_path=str(log_file),
+            log_file_path=str(log_file_path),
             output_dir=str(effective_output_dir)
         )
 
         with self._jobs_lock:
             self.jobs[job_id] = job_info
 
-        # Submit to executor
-        self.executor.submit(self._run_job_wrapper, job_id, job_config)
+        # Launch in background thread to avoid blocking UI
+        t = threading.Thread(target=self._launch_subprocess, args=(job_id, effective_output_dir, log_file_path))
+        t.start()
 
         return job_id
 
-    def _run_job_wrapper(self, job_id: str, config: AppConfig):
+    def _launch_subprocess(self, job_id: str, config_dir: Path, log_file_path: Path):
         """
-        Wrapper to run the pipeline, capturing logs and handling status.
+        Launches the subprocess and waits for it.
         """
-        # Acquire job info safely
         with self._jobs_lock:
             job = self.jobs.get(job_id)
+            if not job:
+                return
+            job.status = JobStatus.RUNNING
 
-        if not job:
-            logger.error(f"Job {job_id} not found in wrapper")
-            return
+        # Command: python main.py --config-path {config_dir} --config-name config
+        # We assume main.py is in the current working directory or accessible.
+        # Better to find absolute path of main.py relative to this file?
+        # Assuming run from root of repo:
+        cmd = [sys.executable, "main.py", "--config-path", str(config_dir.absolute()), "--config-name", "config"]
 
-        job.status = JobStatus.RUNNING
-
-        log_path = job.log_file_path
-
-        # Capture logs from 'nnp_gen' logger to the file
-        # We assume nnp_gen is the parent logger for all core modules
         try:
-            # Note: log_capture_to_file uses ThreadLogFilter to isolate logs
-            with log_capture_to_file("nnp_gen", log_path):
-                try:
-                    # We also need to log the start here so it appears in the file
-                    # Ensure level is INFO or lower so it gets written
-                    job_logger = logging.getLogger("nnp_gen.job_manager")
-                    if job_logger.getEffectiveLevel() > logging.INFO:
-                        job_logger.setLevel(logging.INFO)
+            with open(log_file_path, 'w') as log_file:
+                # We can also log the command itself
+                log_file.write(f"Executing: {' '.join(cmd)}\n")
+                log_file.write(f"Start Time: {datetime.now()}\n")
+                log_file.flush()
 
-                    job_logger.info(f"Starting Job {job_id}")
-                    job_logger.info(f"Output Directory: {config.output_dir}")
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT, # Merge stderr into stdout
+                    cwd=os.getcwd(), # Run from current dir
+                    text=True
+                )
+            
+            with self._jobs_lock:
+                job.pid = process.pid
+            
+            # Wait for completion
+            return_code = process.wait()
 
-                    runner = PipelineRunner(config)
-                    runner.run()
-
-                    with self._jobs_lock:
-                        job = self.jobs[job_id]  # Re-fetch to be safe
-                        job.status = JobStatus.COMPLETED
-                        job.end_time = datetime.now()
-
-                    job_logger.info(f"Job {job_id} Completed Successfully")
-                except Exception as inner_e:
-                    # Log before updating status to avoid race conditions in monitoring
-                    logging.getLogger("nnp_gen").error(f"Job Execution Failed: {inner_e}", exc_info=True)
-
-                    with self._jobs_lock:
-                        job = self.jobs[job_id]
-                        job.status = JobStatus.FAILED
-                        job.end_time = datetime.now()
-                        job.error_message = str(inner_e)
-
-                    raise inner_e
+            with self._jobs_lock:
+                job.end_time = datetime.now()
+                if return_code == 0:
+                    job.status = JobStatus.COMPLETED
+                    with open(log_file_path, 'a') as f:
+                        f.write(f"\nJob Completed Successfully at {job.end_time}\n")
+                else:
+                    job.status = JobStatus.FAILED
+                    job.error_message = f"Process exited with code {return_code}"
+                    with open(log_file_path, 'a') as f:
+                        f.write(f"\nJob Failed with exit code {return_code} at {job.end_time}\n")
 
         except Exception as e:
-            logger.error(f"Job {job_id} failed (caught in wrapper): {e}")
+            logger.error(f"Failed to launch subprocess for job {job_id}: {e}")
+            with self._jobs_lock:
+                job.status = JobStatus.FAILED
+                job.error_message = str(e)
+                job.end_time = datetime.now()
+            
+            with open(log_file_path, 'a') as f:
+                f.write(f"\nSystem Error: {e}\n")
+
+    def stop_job(self, job_id: str) -> bool:
+        """
+        Stops a running job.
+        """
+        import psutil
+        import signal
+
+        with self._jobs_lock:
+            job = self.jobs.get(job_id)
+            if not job or job.status != JobStatus.RUNNING or not job.pid:
+                return False
+        
+        try:
+            parent = psutil.Process(job.pid)
+            for child in parent.children(recursive=True):
+                child.terminate()
+            parent.terminate()
+            
+            # Record stop
+            with self._jobs_lock:
+                 job.status = JobStatus.FAILED
+                 job.error_message = "Stopped by user"
+                 job.end_time = datetime.now()
+
+            with open(job.log_file_path, 'a') as f:
+                 f.write(f"\nSTOPPED BY USER at {datetime.now()}\n")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to stop job {job_id}: {e}")
+            return False
 
     def get_job(self, job_id: str) -> Optional[JobInfo]:
         with self._jobs_lock:

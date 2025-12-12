@@ -26,11 +26,18 @@ class CovalentGenerator(BaseGenerator):
             raise ImportError("pyxtal is required for CovalentGenerator")
 
         structures = []
-        n_structures = 5 # Default number to generate
+        n_structures = self.config.n_initial_structures
+        
+        # Use passed seed
+        seed_val = self.seed if self.seed is not None else 42
+        rng = np.random.RandomState(seed_val)
 
-        rng = np.random.RandomState(42)
-
-        for _ in range(n_structures):
+        attempts = 0
+        max_attempts = n_structures * 10
+        
+        count = 0
+        while count < n_structures and attempts < max_attempts:
+            attempts += 1
             try:
                 struc = pyxtal()
 
@@ -44,7 +51,7 @@ class CovalentGenerator(BaseGenerator):
                 else:
                     sg = 1
 
-                # Random stoichiometry: 1 to 4 atoms per element type
+                # Random stoichiometry: 1 to 4 atoms per element type (per primitive cell)
                 num_ions = [rng.randint(1, 5) for _ in self.config.elements]
 
                 # from_random(dim, group, species, numIons)
@@ -52,12 +59,31 @@ class CovalentGenerator(BaseGenerator):
 
                 if struc.valid:
                     ase_atoms = struc.to_ase()
+                    
+                    # Apply Supercell
+                    if hasattr(self.config, 'supercell_size'):
+                        ase_atoms *= self.config.supercell_size
 
                     # Apply Vacancies
                     if self.config.vacancy_concentration > 0.0:
                         ase_atoms = apply_vacancies(ase_atoms, self.config.vacancy_concentration, rng)
-
+                    
+                    ase_atoms.info['config_source'] = f"covalent_random_sg{sg}"
                     structures.append(ase_atoms)
+                    
+                    # Generate Surfaces?
+                    if self.config.n_surface_samples > 0:
+                        from nnp_gen.generators.utils import generate_random_surfaces
+                        surfaces = generate_random_surfaces(
+                            base_structure=ase_atoms,
+                            n_samples=self.config.n_surface_samples,
+                            rng=rng,
+                            source_prefix=f"covalent_surface_sg{sg}",
+                            max_atoms=self.config.constraints.max_atoms
+                        )
+                        structures.extend(surfaces)
+
+                    count += 1
             except Exception as e:
                 # pyxtal generation can fail often, just skip
                 logger.debug(f"Generation failed: {e}")

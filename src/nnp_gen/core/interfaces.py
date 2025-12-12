@@ -123,10 +123,13 @@ class BaseGenerator(ABC):
         """
         return self.validator.validate(atoms)
 
+from typing import List, Optional, Callable
+# ... imports ...
+
 class IExplorer(ABC):
     """Interface for exploration methods (e.g., MD)."""
     @abstractmethod
-    def explore(self, structures: List[Atoms], n_workers: Optional[int] = None) -> List[Atoms]:
+    def explore(self, structures: List[Atoms], n_workers: Optional[int] = None, callback: Optional[Callable[[List[Atoms]], None]] = None) -> List[Atoms]:
         pass
 
 class ISampler(ABC):

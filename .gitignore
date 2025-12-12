@@ -141,5 +141,7 @@ cython_debug/
 
 # Project specific
 output/
+outputs/
+tutorials/*/output/
 *.db
 *.xyz

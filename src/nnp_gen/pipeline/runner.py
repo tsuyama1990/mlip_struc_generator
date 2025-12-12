@@ -66,7 +66,7 @@ class PipelineRunner:
         if explorer:
             self.explorer = explorer
         else:
-             if self.config.exploration.method == "md":
+             if self.config.exploration.method in ["md", "hybrid_mc_md"]:
                 self.explorer = MDExplorer(self.config)
                 # Pass debug_dir to explorer if possible?
                 # Currently MDExplorer doesn't take debug_dir in init.
@@ -115,44 +115,80 @@ class PipelineRunner:
         # 1. Initialization / Generation
         logger.info("Step 1: Structure Generation")
 
-        # Config hash for metadata
+        initial_structures_path = os.path.join(self.config.output_dir, "initial_structures.xyz")
         config_hash_val = f"hash_{hash(str(self.config))}"
 
-        initial_structures = []
-        try:
-            initial_structures = self.generator.generate()
-            logger.info(f"Generated {len(initial_structures)} initial structures.")
+        # --- STEP 1: ACQUIRE STRUCTURES (Unified Workflow) ---
+        # Strategy:
+        # 1. Check if 'initial_structures.xyz' exists in output (Resume Mode).
+        # 2. If not, Generate using self.generator (Generate Mode).
+        # 3. If Generate Mode, Save to disk immediately.
+        
+        from ase.io import read
+        
+        if os.path.exists(initial_structures_path):
+             logger.info(f"Found existing {initial_structures_path}. Resuming/Using existing structures.")
+             # We rely on reloading in Step 2, so strictly we don't need to load 'initial_structures' variable here
+             # unless we want to check count.
+             # But for code clarity, let's just confirm it's valid.
+             pass 
+        else:
+            logger.info("Generating initial structures...")
+            try:
+                # This works for both 'alloy', 'random', AND 'from_files' (FileLoaderGenerator)
+                generated_structures = self.generator.generate()
+                logger.info(f"Generated/Loaded {len(generated_structures)} structures.")
 
-            if initial_structures:
-                # Checkpoint immediately
+                if not generated_structures:
+                    logger.error("No structures generated. Aborting.")
+                    return
+
+                # Checkpoint & Export
                 meta_list = [
                     {"source": "seed", "config_hash": config_hash_val, "stage": "generated"}
-                    for _ in initial_structures
+                    for _ in generated_structures
                 ]
-                self.ckpt_storage.bulk_save(initial_structures, meta_list)
+                self.ckpt_storage.bulk_save(generated_structures, meta_list)
+                
+                # Save to disk (Canonical Source for Step 2)
+                self.exporter.export(generated_structures, initial_structures_path)
+                
+                # Clear memory
+                del generated_structures
 
-                # Export for user (optional but nice)
-                self.exporter.export(initial_structures, os.path.join(self.config.output_dir, "initial_structures.xyz"))
+            except GenerationError as e:
+                logger.error(f"Generation failed: {e}")
+                raise e
+            except Exception as e:
+                 logger.error(f"Unexpected error in generation: {e}")
+                 raise GenerationError(str(e))
 
-        except GenerationError as e:
-            logger.error(f"Generation failed: {e}")
-            raise e
-        except Exception as e:
-             logger.error(f"Unexpected error in generation: {e}")
-             raise GenerationError(str(e))
-
-        if not initial_structures:
-            logger.error("No structures generated. Aborting.")
-            return
+        # --- STEP 2: STATE ISOLATION (Reload) ---
+        # Whether we generated or resumed, we now Load fresh from disk.
+        logger.info("loading structures from disk for processing...")
+        if not os.path.exists(initial_structures_path):
+            raise PipelineError(f"Critical: {initial_structures_path} missing after generation step.")
+            
+        initial_structures = read(initial_structures_path, index=':')
+        logger.info(f"Loaded {len(initial_structures)} structures for exploration.")
 
         # 2. Exploration (MD)
         logger.info("Step 2: Exploration")
 
         explored_structures = []
+        
+        # Cleanup old progressive file
+        prog_path = os.path.join(self.config.output_dir, "explored_structures_progressive.xyz")
+        if os.path.exists(prog_path):
+            try:
+                os.remove(prog_path)
+            except OSError:
+                pass
 
         if self.explorer:
             # Batch Processing
-            batch_size = 50
+            # Segregation Mode: Run 1 by 1 as requested to ensure full isolation.
+            batch_size = 1
 
             # Simple chunking
             for i in range(0, len(initial_structures), batch_size):
@@ -169,7 +205,21 @@ class PipelineRunner:
                     # Or we can pass debug_dir via config injection if ExplorerConfig allows.
                     # For now, runner will dump the *seed* which failed the batch.
 
-                    explored_batch = self.explorer.explore(batch)
+                    # Define progressive callback
+                    progressive_xyz_path = os.path.join(self.config.output_dir, "explored_structures_progressive.xyz")
+                    
+                    # Ensure file is clean for first batch (or append if later batches? we loop batches)
+                    # If i==0, maybe clean? But explore loop handles one batch. 
+                    # Actually, if we want a single file, we should appendMode.
+                    # ASE write supports append=True.
+                    
+                    def progressive_save(new_structures: List[Atoms]):
+                        from ase.io import write
+                        # Append to XYZ
+                        write(progressive_xyz_path, new_structures, append=True)
+                        logger.debug(f"Progressively saved {len(new_structures)} structures to {progressive_xyz_path}")
+
+                    explored_batch = self.explorer.explore(batch, callback=progressive_save)
 
                     if explored_batch:
                         # Checkpoint immediately
@@ -183,10 +233,11 @@ class PipelineRunner:
                 except (PhysicsViolationError, TimeoutError, ConvergenceError) as e:
                     logger.error(f"Exploration batch failed with specific error: {e}")
                     self._dump_debug_structure(batch[0] if batch else None, f"batch_{i}", str(e))
+                    raise e
                 except Exception as e:
                     logger.error(f"Exploration batch failed unexpectedly: {e}")
                     self._dump_debug_structure(batch[0] if batch else None, f"batch_{i}_crash", str(e))
-                    continue
+                    raise e
         else:
              logger.warning(f"Exploration disabled. Using initial structures.")
              explored_structures = initial_structures
@@ -200,6 +251,14 @@ class PipelineRunner:
 
         if explored_structures:
              self.exporter.export(explored_structures, os.path.join(self.config.output_dir, "explored_structures.xyz"))
+             
+             # Cleanup: Remove progressive file as it's now redundant
+             if os.path.exists(prog_path):
+                 try:
+                     os.remove(prog_path)
+                     logger.debug(f"Removed redundant progressive file: {prog_path}")
+                 except OSError:
+                     pass
 
         logger.info(f"Total structures after exploration: {len(explored_structures)}")
 

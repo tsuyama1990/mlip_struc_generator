@@ -156,15 +156,40 @@ class IonicGenerator(BaseGenerator):
         rng = np.random.RandomState(seed_val)
 
         final_structures = []
-        for atoms in structures:
-            # 1. Set Initial Charges
-            self._set_initial_charges(atoms)
-
-            # 2. Apply Vacancies
-            if self.config.vacancy_concentration > 0.0:
-                atoms = apply_vacancies(atoms, self.config.vacancy_concentration, rng)
-
-            final_structures.append(atoms)
+        
+        # We might want to generate MULTIPLE realizations of the prototypes
+        # n_initial_structures applies to the SET of random outputs?
+        # Or should we output n_initial_structures * len(prototypes)?
+        # For Alloy/Random, we generate N structures.
+        # For Ionic, we generate P prototypes.
+        # Let's simple repeat P prototypes N times with different vacancy realizations.
+        
+        for i in range(self.config.n_initial_structures):
+            for base_atom in structures:
+                # Copy base
+                atoms = base_atom.copy()
+                
+                # 1. Set Initial Charges
+                self._set_initial_charges(atoms)
+                
+                # 2. Apply Vacancies
+                if self.config.vacancy_concentration > 0.0:
+                    atoms = apply_vacancies(atoms, self.config.vacancy_concentration, rng)
+                
+                atoms.info['config_source'] = f"ionic_bulk_{i}"
+                final_structures.append(atoms)
+                
+                # 3. Generate Surfaces?
+                if self.config.n_surface_samples > 0:
+                    from nnp_gen.generators.utils import generate_random_surfaces
+                    surfaces = generate_random_surfaces(
+                        base_structure=atoms,
+                        n_samples=self.config.n_surface_samples,
+                        rng=rng,
+                        source_prefix=f"ionic_surface_{i}",
+                        max_atoms=self.config.constraints.max_atoms
+                    )
+                    final_structures.extend(surfaces)
 
         return final_structures
 

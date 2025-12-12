@@ -17,41 +17,39 @@ def _check_hard_sphere_overlap(atoms: Atoms, indices_to_check: List[int], tolera
     Returns True if overlap detected (unsafe).
     """
     try:
-        # We only need to check distances for the moved atoms
-        # neighbor_list can be slow for large systems, but robust for PBC
-        # 'd' returns distances
-
-        # Optimization: We only care if ANY distance < threshold
-        # We can iterate over indices_to_check
-
-        positions = atoms.get_positions()
-        cell = atoms.get_cell()
-        pbc = atoms.get_pbc()
+        # Robust check using full distance matrix (same as MD Engine)
+        # This prevents any discrepancy between MC check and certain crash in MD.
+        dists = atoms.get_all_distances(mic=True)
+        np.fill_diagonal(dists, np.inf) # Ignore self
+        
         numbers = atoms.get_atomic_numbers()
-
-        for i in indices_to_check:
-            # Simple check against all others (O(N) per moved atom)
-            # For very large N, neighbor list is better. For N < 1000, this is fine.
-            # But let's use ASE's built-in tools which handle PBC correctly.
-
-            # Using neighbor_list for just one atom is not direct API.
-            # Let's use get_distances()
-
-            # Get distances from atom i to all others
-            # mic=True applies Minimum Image Convention (PBC)
-            dists = atoms.get_distances(i, range(len(atoms)), mic=True)
-
-            r_i = covalent_radii[numbers[i]]
-
-            for j, d in enumerate(dists):
-                if i == j: continue
-
-                r_j = covalent_radii[numbers[j]]
-                limit = (r_i + r_j) * tolerance
-
-                if d < limit:
-                    # logger.debug(f"Overlap detected: {i}-{j} d={d:.2f} < {limit:.2f}")
-                    return True
+        radii = covalent_radii[numbers]
+        # Sum of radii matrix
+        sum_radii = radii[:, None] + radii[None, :]
+        limit_matrix = sum_radii * tolerance
+        
+        # Check for violation
+        mask = dists < limit_matrix
+        
+        if np.any(mask):
+            # violation found
+            return True
+            
+        # EXTRA SAFETY: Explicit Absolute Cutoff
+        # Covalent radii tolerance can be permissive for small atoms.
+        # We enforce a hard floor of 1.5 Angstroms for ANY pair (except constraints).
+        min_dist_found = np.min(dists)
+        if min_dist_found < 1.5:
+             # This catches the 0.7-0.9 A cases that somehow slip through tolerance
+             return True
+             
+        # Log pass stats to see what it missed
+            
+        # Log pass stats to see what it missed
+        # min_d = np.min(dists)
+        # import sys
+        # sys.stderr.write(f"MC Check PASSED. Min Dist: {min_d:.4f}\n")
+            
         return False
 
     except Exception as e:
@@ -96,8 +94,19 @@ def perform_mc_swap(atoms: Atoms, mc_config: MonteCarloConfig, temp: float, calc
 
     # --- STRATEGY A: VACANCY HOP (Smart Rattle) ---
     if strategy == MCStrategy.VACANCY_HOP:
-        # Pick random atom
-        idx = random.randint(0, len(atoms) - 1)
+        # Filter candidates if configured
+        candidate_indices = range(len(atoms))
+        if mc_config.vacancy_hop_elements:
+             candidate_indices = [
+                 i for i, s in enumerate(atoms.get_chemical_symbols()) 
+                 if s in mc_config.vacancy_hop_elements
+             ]
+        
+        if not candidate_indices:
+             return False # No allowed candidates
+
+        # Pick random atom from allowed candidates
+        idx = random.choice(candidate_indices)
 
         # Large displacement (2.5 A) in random direction
         # Why 2.5? Typical interatomic distance. Jumping to a neighbor site (void).
@@ -170,6 +179,25 @@ def perform_mc_swap(atoms: Atoms, mc_config: MonteCarloConfig, temp: float, calc
             m = atoms.get_initial_magnetic_moments()
             m[idx1], m[idx2] = m[idx2], m[idx1]
             atoms.set_initial_magnetic_moments(m)
+
+        # Safety: Geometric Overlap Check for Swapped Atoms
+        # We need to check if placing atom types at these positions causes overlap
+        # based on NEW radii.
+        if _check_hard_sphere_overlap(atoms, [idx1, idx2]):
+             # Revert
+             atoms.symbols[idx1], atoms.symbols[idx2] = atoms.symbols[idx2], atoms.symbols[idx1]
+             # Revert other arrays if needed (omitted for brevity as we return False)
+             if atoms.has("initial_charges"):
+                 q = atoms.get_initial_charges()
+                 q[idx1], q[idx2] = q[idx2], q[idx1]
+                 atoms.set_initial_charges(q)
+             if atoms.has("initial_magnetic_moments"):
+                 m = atoms.get_initial_magnetic_moments()
+                 m[idx1], m[idx2] = m[idx2], m[idx1]
+                 atoms.set_initial_magnetic_moments(m)
+             
+             # logger.debug(f"Swap rejected due to hard sphere overlap.")
+             return False
 
     # --- METROPOLIS ---
     try:

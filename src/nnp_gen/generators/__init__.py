@@ -7,7 +7,9 @@ from nnp_gen.core.config import (
     VacuumAdsorbateSystemConfig,
     SolventAdsorbateSystemConfig,
     KnowledgeSystemConfig,
-    UserFileSystemConfig,
+    FileSystemConfig,
+    RandomSystemConfig,
+    DesignatedSystemConfig,
     SystemConfig
 )
 from nnp_gen.generators.ionic import IonicGenerator
@@ -18,6 +20,8 @@ from nnp_gen.generators.molecule import MoleculeGenerator
 from nnp_gen.generators.adsorption import VacuumAdsorbateGenerator, SolventAdsorbateGenerator
 from nnp_gen.generators.knowledge import KnowledgeBasedGenerator
 from nnp_gen.generators.file_loader import FileGenerator
+from nnp_gen.generators.random_gen import RandomGenerator
+from nnp_gen.generators.designated import DesignatedGenerator
 from typing import Type
 
 class GeneratorFactory:
@@ -39,7 +43,11 @@ class GeneratorFactory:
             return SolventAdsorbateGenerator(config)
         elif isinstance(config, KnowledgeSystemConfig):
             return KnowledgeBasedGenerator(config)
-        elif isinstance(config, UserFileSystemConfig):
+        elif isinstance(config, FileSystemConfig):
             return FileGenerator(config)
+        elif isinstance(config, RandomSystemConfig):
+            return RandomGenerator(config)
+        elif isinstance(config, DesignatedSystemConfig):
+            return DesignatedGenerator(config)
         else:
             raise ValueError(f"Unknown system type: {type(config)}")

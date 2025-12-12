@@ -283,8 +283,25 @@ def detect_vacuum(atoms: Atoms, threshold: float = 5.0) -> bool:
     grid_points = atoms.cell.cartesian_positions(scaled_points)
 
     # Build Tree for Atoms
+    # For general (non-orthogonal) cells, KDTree(boxsize=...) is invalid as it assumes orthogonal boundaries.
+    # We manually replicate atoms to ensure correct distance checks across periodic boundaries.
     positions = atoms.get_positions()
-    tree = KDTree(positions, boxsize=lengths) # boxsize handles PBC for KDTree query
+    cell_array = np.array(atoms.get_cell())
+    
+    # Generate shifts for 3x3x3 images [-1, 0, 1]
+    # We can use itertools to be cleaner, but standard loops work fine
+    shifts = []
+    for i in [-1, 0, 1]:
+        for j in [-1, 0, 1]:
+            for k in [-1, 0, 1]:
+                shifts.append(i * cell_array[0] + j * cell_array[1] + k * cell_array[2])
+    
+    shifts = np.array(shifts)
+    # all_positions shape: (27 * N_atoms, 3)
+    # Broadcast: (27, 1, 3) + (1, N, 3) -> (27, N, 3) -> flatten
+    all_positions = (shifts[:, None, :] + positions[None, :, :]).reshape(-1, 3)
+    
+    tree = KDTree(all_positions) # No boxsize, standard Euclidean metric
 
     # Determine occupancy
     # We use a uniform radius for simplicity or max covalent radius in system

@@ -1,34 +1,89 @@
+
 output_dir: tutorials/01_alloy_fe_pt/output
 seed: 123
 
+# -----------------------------------------------------------------------------
+# System Configuration
+# -----------------------------------------------------------------------------
+
+# --- SIMPLIFIED ALLOY + SURFACE MODE ---
 system:
   type: alloy
   elements: [Fe, Pt]
-  constraints:
-    max_atoms: 100
-    min_density: 5.0
-    min_distance: 1.8
-    min_cell_length_factor: 1.0
-    r_cut: 4.0
+  n_initial_structures: 10 # 10 Bulks
+  n_surface_samples: 1     # + 1 Surfaces per bulk (Total = 10 + 10*1 = 20)
+  
+  # Composition Control (Variable Ratios!)
+  composition_mode: range
+  composition_ranges:
+    Fe: [0.1, 0.9] # Vary between 40-60% Fe
+    Pt: [0.1, 0.9]
+  
+  # Base Physics
+  lattice_constant: 3.8
+  spacegroup: 225
+  supercell_size: [3, 3, 3]
   pbc: [true, true, true]
   rattle_std: 0.05
   vol_scale_range: [0.90, 1.10]
-  lattice_constant: 3.8
-  spacegroup: 225
-  supercell_size: [2, 2, 2]
+  
+  constraints:
+    max_atoms: 150 # Increased for slabs
+    min_density: 0.0 # Allow vacuum
+    min_distance: 1.8
+    r_cut: 4.0
+    min_cell_length_factor: 1.0
+  
   default_magmoms:
     Fe: 3.0
     Pt: 0.0
 
+# -----------------------------------------------------------------------------
+# Exploration (MD / MC)
+# -----------------------------------------------------------------------------
 exploration:
   method: md
   model_name: mace
-  temperature: 600
-  steps: 50
-  timestep: 1.0
+  device: cuda
+  
+  # Temperature Gradient Mode (Simulated Annealing / Heating)
+  temperature_mode: gradient
+  temp_start: 1500 # Set to 1500 K (Below melting but high enough for diffusion)
+  temp_end: 300     # End Low (Ordered)
+  temperature: 300  # Fallback/Ignored in gradient mode
+  
+  # Trajectory Settings
+  steps: 10000
+  timestep: 1.0 # Set to 1.0 fs for stability
+  snapshot_interval: 100
+  ensemble: AUTO # Use NVT for clusters/surfaces, NPT for bulk
+  
+  # --- Hybrid Monte Carlo / MD Swaps ---
+  mc_config:
+    enabled: true        # Enable to allow ordering
+    strategy: [SWAP]     # Options: [SWAP, VACANCY_HOP]
+                         # SWAP = Exchange species (ideal for ordering)
+    swap_interval: 10
+    swap_pairs: [[Fe, Pt]] # Explicitly define pairs to swap
+    # vacancy_hop_elements: [Fe]  # (Optional) If using VACANCY_HOP, only allow these elements to hop.
+                                  # If omitted, ALL atoms can hop into vacancies.
+    
+    temp: null           # Set to null (or omit) to sync with MD temperature gradient
+    
+  zbl_config:
+    enabled: false
+    cutoff: 1.5
+    skin: 0.5
 
+# -----------------------------------------------------------------------------
+# Sampling
+# -----------------------------------------------------------------------------
 sampling:
-  strategy: random
-  n_samples: 5
-  descriptor_type: soap
+  strategy: fps       # Options: [fps, random, manual]
+                         # fps = Farthest Point Sampling (diverse coverage)
+                         # random = Simple random
+  n_samples: 1000
+  descriptor_type: soap  # Options: [soap, ace] (Descriptor for FPS)
+                         # soap = Robust many-body descriptor
+                         # ace = Faster alternative
   min_distance: 1.5

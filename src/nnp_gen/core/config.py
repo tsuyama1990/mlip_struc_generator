@@ -24,8 +24,17 @@ class MonteCarloConfig(BaseModel):
     strategy: List[MCStrategy] = Field([MCStrategy.SWAP], description="List of MC strategies to use")
     swap_interval: int = Field(100, ge=1, description="Number of MD steps between MC moves")
     swap_pairs: Optional[List[Tuple[str, str]]] = Field(None, description="List of element pairs to swap")
+    vacancy_hop_elements: Optional[List[str]] = Field(None, description="List of elements allowed to hop into vacancies. If None, all elements can hop.")
     allow_charge_mismatch: bool = Field(False, description="Allow swapping ions with different charges")
     temp: Optional[float] = Field(None, gt=0, description="Temperature for MC acceptance (defaults to MD temp)")
+
+    @model_validator(mode='after')
+    def validate_swap_config(self) -> 'MonteCarloConfig':
+        if self.enabled:
+             if MCStrategy.SWAP in self.strategy:
+                 if not self.swap_pairs:
+                     raise ValueError("MCStrategy.SWAP is enabled but 'swap_pairs' is not defined. Please specify pairs to swap (e.g. [['Fe', 'Pt']]).")
+        return self
 
     @field_validator('swap_pairs', mode='before')
     @classmethod
@@ -48,6 +57,11 @@ class MonteCarloConfig(BaseModel):
                     raise ValueError(f"Invalid swap pair format: {item}")
             return new_list
         return v
+
+class ZBLConfig(BaseModel):
+    enabled: bool = Field(False, description="Activate ZBL Potential")
+    cutoff: float = Field(1.5, description="ZBL Cutoff in Angstrom")
+    skin: float = Field(0.5, description="ZBL Skin")
 
 class PhysicsConstraints(BaseModel):
     max_atoms: int = Field(200, description="Hard limit for total number of atoms")
@@ -99,7 +113,10 @@ class IonicSystemConfig(BaseSystemConfig):
     oxidation_states: Dict[str, int] = Field(..., description="Oxidation states for each element")
     charge_balance_tolerance: float = Field(0.0, description="Tolerance for charge balance")
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
+    supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
     default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")
+    n_initial_structures: int = Field(1, description="Number of independent random initial structures to generate")
+    n_surface_samples: int = Field(0, description="Number of random surface slabs to generate per initial bulk structure")
     vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
 
     @field_validator('vacancy_concentration')
@@ -115,8 +132,24 @@ class AlloySystemConfig(BaseSystemConfig):
     lattice_estimation_method: Literal["mean", "max"] = Field("max", description="Method to estimate lattice constant ('mean' or 'max')")
     spacegroup: Optional[int] = Field(None, description="Target spacegroup number (1-230)")
     supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
+    n_initial_structures: int = Field(1, description="Number of independent random initial structures to generate")
+    n_surface_samples: int = Field(0, description="Number of random surface slabs to generate per initial bulk structure")
+    
+    # Composition Control
+    composition_mode: Literal["random", "balanced", "range"] = Field("random", description="Mode for determining composition")
+    composition_ranges: Optional[Dict[str, Tuple[float, float]]] = Field(None, description="Ranges for composition (e.g. {'Fe': (0.1, 0.9)})")
+
     default_magmoms: Optional[Dict[str, float]] = Field(None, description="Initial magnetic moments per element")
     vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
+
+    @field_validator('composition_ranges')
+    @classmethod
+    def validate_comp_ranges(cls, v: Any) -> Any:
+        if v:
+            for el, r in v.items():
+                if not (0.0 <= r[0] <= r[1] <= 1.0):
+                     raise ValueError(f"Invalid range for {el}: {r}")
+        return v
 
     @field_validator('vacancy_concentration')
     @classmethod
@@ -129,6 +162,9 @@ class CovalentSystemConfig(BaseSystemConfig):
     type: Literal["covalent"] = "covalent"
     dimensionality: Literal[0, 1, 2, 3] = Field(3, description="Dimensionality of the system")
     min_volume: Optional[float] = Field(None, description="Minimum volume per atom")
+    supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion factors")
+    n_initial_structures: int = Field(1, description="Number of random structures to generate")
+    n_surface_samples: int = Field(0, description="Number of random surface slabs to generate per initial bulk structure")
     vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
 
     @field_validator('vacancy_concentration')
@@ -212,6 +248,7 @@ class VacuumAdsorbateSystemConfig(BaseSystemConfig):
     layers: int = Field(4, description="Number of atomic layers in the slab")
     vacuum: float = Field(10.0, description="Vacuum size on top of the surface")
     defect_rate: float = Field(0.0, ge=0.0, le=1.0, description="Fraction of top-layer atoms to remove")
+    n_initial_structures: int = Field(1, description="Number of independent random initial structures to generate")
     adsorbates: List[AdsorbateConfig] = Field(default_factory=list, description="List of adsorbates to place")
 
     @field_validator('defect_rate')
@@ -273,28 +310,80 @@ class KnowledgeSystemConfig(BaseSystemConfig):
                         pass # Let field validator handle it
         return data
 
-class UserFileSystemConfig(BaseSystemConfig):
-    type: Literal["user_file"] = "user_file"
-    path: str = Field(..., description="Path to the structure file")
-    format: Optional[str] = Field(None, description="File format (e.g., 'cif', 'xyz'). If None, inferred from extension.")
-    repeat: int = Field(1, description="Number of times to duplicate the structures")
-    vacancy_concentration: float = Field(0.0, description="Fraction of atoms to remove as vacancies")
 
-    @field_validator('repeat')
+class RandomSystemConfig(BaseSystemConfig):
+    type: Literal["random"] = "random"
+    n_initial_structures: int = Field(1, description="Number of random structures to generate")
+    n_surface_samples: int = Field(0, description="Number of random surface slabs to generate per initial bulk structure")
+    composition_mode: Literal["random", "balanced", "range"] = Field("random", description="Mode for determining composition")
+    composition_ranges: Optional[Dict[str, Tuple[float, float]]] = Field(None, description="Ranges for composition (e.g. {'Fe': (0.1, 0.9)})")
+    
+    spacegroup_mode: Literal["fixed", "random_list", "random_all"] = Field("random_all", description="Mode for selecting spacegroup")
+    spacegroups: Optional[List[int]] = Field(None, description="List of allowed spacegroups if mode is random_list")
+    lattice_constant_range: List[float] = Field([2.5, 5.0], min_length=2, max_length=2, description="Range for lattice constant sampling")
+    
+    supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion")
+
+    @field_validator('composition_ranges')
     @classmethod
-    def validate_repeat(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("repeat must be at least 1")
+    def validate_comp_ranges(cls, v: Any) -> Any:
+        if v:
+            for el, r in v.items():
+                if not (0.0 <= r[0] <= r[1] <= 1.0):
+                     raise ValueError(f"Invalid range for {el}: {r}")
         return v
 
-    @field_validator('vacancy_concentration')
-    @classmethod
-    def validate_vacancy_concentration(cls, v: float) -> float:
-        if not (0.0 <= v <= 0.25):
-            raise ValueError("vacancy_concentration must be between 0.0 and 0.25")
-        return v
+class DesignatedSystemConfig(BaseSystemConfig):
+    type: Literal["designated"] = "designated"
+    spacegroup: int = Field(..., description="Exact spacegroup number")
+    lattice_constant: float = Field(..., description="Exact lattice constant")
+    supercell_size: List[int] = Field([1, 1, 1], min_length=3, max_length=3, description="Supercell expansion")
+    
+    # User can specify exact composition via Elements list repeating (e.g. [Fe, Fe, Fe, Pt])
+    # OR we can add a composition dict? 
+    # Current codebase uses 'elements' list and fills them.
+    # To be "Designated", we might want strict formula?
+    # Let's add explicit `formula` or `composition` map.
+    # But `BaseSystemConfig` has `elements`.
+    
+    # If user wants Fe3Pt, they can use Knowledge type?
+    # "3. Designated by space index etc ... : get user to key in space group and supercell size etc."
+    # So this is basically explicit Alloy without random lattice estimation.
+    vacancy_concentration: float = Field(0.0, description="Vacancy concentration")
 
-# Discriminated Union for System Config
+class FileSystemConfig(BaseSystemConfig):
+    type: Literal["from_files"] = "from_files"
+    path: str = Field(..., description="Path to file or directory")
+    format: Optional[str] = Field(None, description="File format (e.g. 'cif', 'xyz'). Automatic if None.")
+    recursive: bool = Field(False, description="Recursively search directories")
+    pattern: str = Field("*", description="Glob pattern for filtering files")
+    repeat: int = Field(1, description="Duplicate structures N times")
+    
+    # Base constraints apply strict checks
+
+class MixedSystemConfig(BaseSystemConfig):
+    type: Literal["mixed"] = "mixed"
+    # We use Dict[str, Any] to avoid recursive Pydantic complexity but allow any valid system config
+    systems: List[Dict[str, Any]] = Field(..., min_length=1, description="List of sub-system configurations")
+    
+    @model_validator(mode='before')
+    @classmethod
+    def extract_elements(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if 'elements' not in data or not data['elements']:
+                elems = set()
+                if 'systems' in data and isinstance(data['systems'], list):
+                    for sub in data['systems']:
+                        if isinstance(sub, dict):
+                            sub_elems = sub.get('elements', [])
+                            if sub_elems:
+                                elems.update(sub_elems)
+                            # Handle deeper nesting if needed (e.g. substrate in vacuum_adsorbate)
+                            # But usually user should provide elements at top level if mixed?
+                            # Or we just aggregate whatever we find.
+                if elems:
+                    data['elements'] = list(elems)
+        return data
 SystemConfig = Union[
     IonicSystemConfig,
     AlloySystemConfig,
@@ -303,8 +392,11 @@ SystemConfig = Union[
     InterfaceSystemConfig,
     VacuumAdsorbateSystemConfig,
     SolventAdsorbateSystemConfig,
-    UserFileSystemConfig,
-    KnowledgeSystemConfig
+    FileSystemConfig,
+    KnowledgeSystemConfig,
+    MixedSystemConfig,
+    RandomSystemConfig,
+    DesignatedSystemConfig
 ]
 
 # --- Exploration Configuration ---
@@ -312,6 +404,7 @@ SystemConfig = Union[
 class ExplorationConfig(BaseModel):
     method: Literal["md", "mc", "hybrid_mc_md", "melt_quench", "normal_mode"] = Field("md", description="Exploration method")
     model_name: Literal["mace", "sevenn", "emt"] = Field("mace", description="Calculator model name")
+    device: str = Field("cpu", description="Device to run on (cpu, cuda)")
     
     # Temperature Settings
     temperature_mode: Literal["constant", "gradient"] = Field("constant", description="Temperature control mode")
@@ -323,9 +416,11 @@ class ExplorationConfig(BaseModel):
     ttime: float = Field(100.0, description="Thermostat time constant for NPT in fs")
     steps: int = Field(1000, description="Number of steps per exploration run")
     timestep: float = Field(1.0, description="Timestep in fs")
+    snapshot_interval: int = Field(100, description="Interval for saving snapshots")
 
     ensemble: EnsembleType = Field(EnsembleType.AUTO, description="MD Ensemble (AUTO, NVT, NPT)")
     mc_config: Optional[MonteCarloConfig] = Field(default_factory=lambda: MonteCarloConfig(enabled=False), description="Monte Carlo Configuration")
+    zbl_config: Optional[ZBLConfig] = Field(default_factory=lambda: ZBLConfig(enabled=False), description="ZBL Potential Configuration")
 
     @field_validator('temperature')
     @classmethod
@@ -375,3 +470,4 @@ class AppConfig(BaseModel):
     sampling: SamplingConfig
     output_dir: str = Field("output", description="Directory to save results")
     seed: int = Field(42, description="Random seed")
+

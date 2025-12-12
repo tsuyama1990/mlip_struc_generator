@@ -19,8 +19,13 @@ def main(cfg: DictConfig):
         print(f"Error: Invalid configuration. {e}")
         return
 
-    runner = PipelineRunner(app_config)
-    runner.run()
+    from nnp_gen.core.system_utils import KeepAwake
+    
+    # Wrap execution to prevent sleep
+    with KeepAwake():
+        runner = PipelineRunner(app_config)
+        runner.run()
+    
     print("Done.")
 
 if __name__ == "__main__":
