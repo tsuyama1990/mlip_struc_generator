@@ -8,12 +8,17 @@ from nnp_gen.explorers.md_engine import run_single_md_process, MDExplorer, _get_
 from nnp_gen.core.config import ExplorationConfig, MonteCarloConfig
 
 class MockCalculator:
+    implemented_properties = ["energy", "forces", "stress"]
     def get_forces(self, atoms):
         return np.zeros((len(atoms), 3))
     def get_potential_energy(self, atoms):
         return 0.0
     def get_stress(self, atoms):
         return np.zeros(6)
+    def calculate(self, atoms=None, properties=['energy'], system_changes=None):
+        pass
+    def reset(self):
+        pass
 
 @pytest.fixture
 def mock_deps(mocker):
@@ -52,8 +57,14 @@ def test_run_single_md_success(mocker):
         ensemble="NVT"
     )
 
-    # Signature: (atoms, expl_config, model_name, device, timeout_seconds)
-    traj = run_single_md_process(atoms, expl_config, "mace", "cpu", 3600)
+    # Signature: (atoms, expl_config, model_name, device, progress_queue, timeout_seconds, stop_event)
+    # The signature in source code is: (atoms, expl_config, model_name, device, progress_queue=None, timeout_seconds=3600, stop_event=None)
+    # But in the test call above it was passing 3600 as the 5th argument.
+    # 5th argument is `progress_queue`.
+    # So `progress_queue` became `3600` (int).
+    # And then `progress_queue.put(chunk)` failed with AttributeError: 'int' object has no attribute 'put'.
+
+    traj = run_single_md_process(atoms, expl_config, "mace", "cpu", progress_queue=None, timeout_seconds=3600)
 
     assert traj is not None
     # steps=10, swap/chunk check might lead to snapshot.
@@ -92,7 +103,7 @@ def test_run_single_md_explosion(mocker):
     )
 
     try:
-        run_single_md_process(atoms, expl_config, "mace", "cpu", 3600)
+        run_single_md_process(atoms, expl_config, "mace", "cpu", progress_queue=None, timeout_seconds=3600)
         assert False, "Should raise exception"
     except Exception as e:
         # It dumps and re-raises
@@ -105,12 +116,21 @@ def test_explore_parallel(mocker):
     mocker.patch("concurrent.futures.ProcessPoolExecutor", return_value=mock_executor)
 
     # Mock submit
-    mock_future = MagicMock()
-    mock_future.result.return_value = [Atoms('H')]
-    mock_executor.submit.return_value = mock_future
+    mock_future1 = MagicMock()
+    mock_future1.result.return_value = [Atoms('H')]
+    mock_future2 = MagicMock()
+    mock_future2.result.return_value = [Atoms('H')]
 
-    # Mock as_completed
-    mocker.patch("concurrent.futures.as_completed", return_value=[mock_future, mock_future])
+    # Use side_effect to return different futures
+    mock_executor.submit.side_effect = [mock_future1, mock_future2]
+
+    # Mock concurrent.futures.wait
+    # It returns (done, not_done).
+    # We simulate immediate completion of all futures.
+    # Note: wait takes a set of futures. We return the same set as done.
+    # We need a side_effect that returns whatever was passed as first arg?
+    # Or just return both our mocks.
+    mocker.patch("concurrent.futures.wait", return_value=({mock_future1, mock_future2}, set()))
 
     # We mock run_single_md_process so it doesn't run locally in test context?
     # Actually MDExplorer calls run_single_md_process inside submit.

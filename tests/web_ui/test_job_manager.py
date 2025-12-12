@@ -5,10 +5,11 @@ from nnp_gen.core.config import AppConfig
 
 def test_job_manager_submission(mocker, minimal_config, tmp_path):
     """Test submitting a job via JobManager."""
-    # Mock PipelineRunner
-    mock_runner = mocker.patch("nnp_gen.web_ui.job_manager.PipelineRunner")
-    mock_instance = mock_runner.return_value
-    mock_instance.run.return_value = None
+    # Mock subprocess.Popen instead of PipelineRunner, because JobManager launches a subprocess.
+    mock_popen = mocker.patch("subprocess.Popen")
+    mock_process = mock_popen.return_value
+    mock_process.pid = 12345
+    mock_process.wait.return_value = 0 # Success
 
     # Init JobManager
     # Reset singleton for testing (hacky but needed since it's a singleton)
@@ -42,23 +43,28 @@ def test_job_manager_submission(mocker, minimal_config, tmp_path):
     # Verify effective output dir
     assert job_id in job_info.output_dir
 
-    # Verify PipelineRunner called with correct path
-    assert mock_runner.call_count == 1
-    call_args = mock_runner.call_args
-    passed_config = call_args[0][0]
-    assert passed_config.output_dir == job_info.output_dir
+    # Verify subprocess launched
+    assert mock_popen.call_count == 1
+    call_args = mock_popen.call_args
+    cmd = call_args[0][0]
+    assert "main.py" in cmd
+    assert "--config-path" in cmd
 
     # Verify log file exists and contains start message
+    # (Note: subprocess stdout redirection won't happen since we mocked Popen)
+    # But JobManager writes "Executing..." before calling Popen
     with open(job_info.log_file_path, "r") as f:
         content = f.read()
-        assert f"Starting Job {job_id}" in content
-        assert "Completed Successfully" in content
+        assert f"Executing:" in content
+        assert "Job Completed Successfully" in content
 
 def test_job_failure_handling(mocker, minimal_config, tmp_path):
     """Test handling of job failures."""
-    mock_runner = mocker.patch("nnp_gen.web_ui.job_manager.PipelineRunner")
-    mock_instance = mock_runner.return_value
-    mock_instance.run.side_effect = RuntimeError("Explosion!")
+    # Mock subprocess.Popen failure
+    mock_popen = mocker.patch("subprocess.Popen")
+    mock_process = mock_popen.return_value
+    mock_process.pid = 12345
+    mock_process.wait.return_value = 1 # Error code
 
     JobManager._instance = None
     manager = JobManager()
@@ -76,9 +82,9 @@ def test_job_failure_handling(mocker, minimal_config, tmp_path):
         time.sleep(0.1)
 
     assert job_info.status == JobStatus.FAILED
-    assert "Explosion!" in job_info.error_message
+    assert "Process exited with code 1" in job_info.error_message
 
     # Verify log contains error
     with open(job_info.log_file_path, "r") as f:
         content = f.read()
-        assert "Job Execution Failed: Explosion!" in content
+        assert "Job Failed with exit code 1" in content

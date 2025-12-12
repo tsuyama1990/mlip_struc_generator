@@ -31,7 +31,8 @@ def test_full_pipeline_emt(output_dir):
             model_name="emt", # Using EMT
             steps=20, # Short run for test speed
             timestep=1.0,
-            temperature=300
+                temperature=300,
+                snapshot_interval=5
         ),
         sampling=SamplingConfig(
             strategy="random", # Simple sampling
