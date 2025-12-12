@@ -248,87 +248,122 @@ def detect_vacuum(atoms: Atoms, threshold: float = 5.0) -> bool:
     """
     Detect if the system has vacuum (is a slab, wire, or cluster) or is fully bulk.
 
-    Uses Grid-Based Void Detection:
+    Uses Grid-Based Void Detection with NeighborList (PBC-aware):
     1. Grid spacing ~1.0 A.
-    2. Mark points as occupied if within covalent_radius + 0.5 of any atom.
-    3. Use connected components to find largest empty void.
-    4. If span of void > threshold, it's Vacuum.
+    2. Create grid points covering the cell.
+    3. Use neighbor list to check distance from grid points to any atom.
+    4. If any grid point is further than (threshold/2) from all atoms, it's a void.
     """
     if any(not p for p in atoms.pbc):
         return True
 
     # Setup Grid
-    cell = atoms.get_cell()
-    # Check if cell is orthogonal enough?
-    # For general cells, we should work in fractional coordinates or transform grid points.
-    # Simpler: Create grid in scaled coordinates [0, 1].
-
-    grid_spacing = 1.0 # Angstrom
     lengths = atoms.cell.lengths()
+    grid_spacing = 1.0 # Angstrom
 
     # Grid dimensions
     ngrid = np.ceil(lengths / grid_spacing).astype(int)
-    ngrid = np.maximum(ngrid, 1) # Safety for degenerate cells
+    ngrid = np.maximum(ngrid, 1)
 
     # Generate grid points in scaled coords
     x = np.linspace(0, 1, ngrid[0], endpoint=False)
     y = np.linspace(0, 1, ngrid[1], endpoint=False)
     z = np.linspace(0, 1, ngrid[2], endpoint=False)
 
-    # Meshgrid (Cartesian)
     xv, yv, zv = np.meshgrid(x, y, z, indexing='ij')
     scaled_points = np.stack([xv.flatten(), yv.flatten(), zv.flatten()], axis=1)
 
     # Convert to Cartesian
     grid_points = atoms.cell.cartesian_positions(scaled_points)
-
-    # Build Tree for Atoms
-    # For general (non-orthogonal) cells, KDTree(boxsize=...) is invalid as it assumes orthogonal boundaries.
-    # We manually replicate atoms to ensure correct distance checks across periodic boundaries.
-    positions = atoms.get_positions()
-    cell_array = np.array(atoms.get_cell())
     
-    # Generate shifts for 3x3x3 images [-1, 0, 1]
-    # We can use itertools to be cleaner, but standard loops work fine
-    shifts = []
-    for i in [-1, 0, 1]:
-        for j in [-1, 0, 1]:
-            for k in [-1, 0, 1]:
-                shifts.append(i * cell_array[0] + j * cell_array[1] + k * cell_array[2])
+    # Create Dummy Atoms for the grid
+    # We use a dummy symbol 'H' (doesn't matter)
+    grid_atoms = Atoms('H' * len(grid_points), positions=grid_points, cell=atoms.cell, pbc=atoms.pbc)
     
-    shifts = np.array(shifts)
-    # all_positions shape: (27 * N_atoms, 3)
-    # Broadcast: (27, 1, 3) + (1, N, 3) -> (27, N, 3) -> flatten
-    all_positions = (shifts[:, None, :] + positions[None, :, :]).reshape(-1, 3)
+    # Combine real atoms and grid atoms
+    # Real atoms are indices 0 to N-1
+    # Grid atoms are indices N to N+M-1
+    combined = atoms.copy()
+    combined += grid_atoms
     
-    tree = KDTree(all_positions) # No boxsize, standard Euclidean metric
+    n_real = len(atoms)
 
-    # Determine occupancy
-    # We use a uniform radius for simplicity or max covalent radius in system
-    # For a robust "void" check, we want to know if a probe fits.
-    # Probe radius ~1.0A usually.
-    # Occupied if dist < (r_atom + r_probe).
-    # Let's simply check distance to nearest atom.
+    # Setup NeighborList
+    # We want to know if a grid point has ANY neighbor within cutoff.
+    # cutoff = threshold / 2.0. If no neighbor within this cutoff, it's a large void.
+    # Actually, to reproduce "Largest Empty Sphere" > threshold/2 logic:
+    # We need the distance to the nearest atom.
+    # If nearest_dist > threshold/2, then vacuum exists.
 
-    # Get max covalent radius in system to set a safe upper bound query
-    max_cov = max([covalent_radii[n] for n in set(atoms.numbers)])
-    probe_r = 1.0
-    cutoff = max_cov + probe_r
+    # Using neighbor_list from ase
+    from ase.neighborlist import neighbor_list
 
-    # Query tree
-    # KDTree query returns distance to nearest neighbor
-    dists, _ = tree.query(grid_points, k=1)
+    # We need to query distances between grid_atoms and atoms.
+    # neighbor_list('d', combined, cutoff) returns all pairs.
+    # We filter pairs where (i < n_real AND j >= n_real) or vice versa.
 
-    # Identify voids
-    # Use "Largest Empty Sphere" approximation.
-    # We simply look for the point in the grid that is furthest from any atom.
-    # If max(min_dist) > threshold / 2, then there is a void of diameter > threshold.
+    # Optimization: Use a cutoff slightly larger than threshold/2 to be safe?
+    # No, we want to know if there exists a point with dist > threshold/2.
+    # So if we query with cutoff = threshold/2, and a point has NO neighbors,
+    # then it is far from all atoms.
 
-    max_void_radius = np.max(dists)
+    # However, atoms have radii. The "void" definition usually accounts for atomic radii.
+    # The original code used: max_void_radius > threshold/2.
+    # And distance check was to atom centers? Yes, KDTree on positions.
+    # Wait, original KDTree approach used `dists` which are distances to centers.
+    # So "void size" in original code implies distance to center.
+    # So we stick to distance to center.
 
-    # Threshold is interpreted as a diameter (gap size).
-    if max_void_radius > (threshold / 2.0):
-        return True
+    cutoff = threshold / 2.0
+
+    # Get indices of neighbors
+    # 'i' are indices of first atom, 'j' are indices of second atom.
+    # We want to find grid points (indices >= n_real) that are NOT in the neighbor list of any real atom.
+
+    # We only care about interactions between Real (0..n_real-1) and Grid (n_real..end)
+    # But neighbor_list computes all.
+    # We can use update() but neighbor_list function is easier.
+
+    i_indices, j_indices = neighbor_list('ij', combined, cutoff)
+
+    # We are looking for grid points (index g) such that there is NO (r, g) pair with dist < cutoff.
+    # In neighbor_list output, we look for j where i < n_real.
+
+    # Filter for pairs between Real and Grid
+    # Because bothways=True (default implied? No, neighbor_list defaults? check doc)
+    # ase.neighborlist.neighbor_list(quantities, a, cutoff, self_interaction=False)
+    # It returns both i-j and j-i.
+
+    # Find all grid indices that HAVE a neighbor
+    connected_grid_indices = set()
+
+    # Mask for interactions between Real (i < n_real) and Grid (j >= n_real)
+    mask = (i_indices < n_real) & (j_indices >= n_real)
+    connected_grid_indices.update(j_indices[mask])
+
+    # Also check j < n_real and i >= n_real (symmetry)
+    mask2 = (i_indices >= n_real) & (j_indices < n_real)
+    connected_grid_indices.update(i_indices[mask2])
+
+    # Normalize grid indices to 0..n_grid-1
+    # grid index in combined is k. Normalized is k - n_real.
+
+    num_grid_points = len(grid_atoms)
+
+    # If the number of connected grid points is less than total grid points,
+    # then there is at least one grid point with no neighbors within cutoff.
+    # That point is a "void center" with radius > threshold/2.
+
+    # Adjust for set containing global indices
+    # We need to count how many unique grid indices are covered.
+
+    covered_count = 0
+    for idx in connected_grid_indices:
+        if idx >= n_real:
+            covered_count += 1
+
+    if covered_count < num_grid_points:
+        return True # Found a void
 
     return False
 

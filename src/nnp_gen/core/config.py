@@ -17,6 +17,11 @@ class MCStrategy(str, Enum):
     SWAP = "SWAP"
     VACANCY_HOP = "VACANCY_HOP"
 
+class ThermostatType(str, Enum):
+    LANGEVIN = "langevin"
+    BERENDSEN = "berendsen"
+    NOSE_HOOVER = "nose_hoover"
+
 # --- Sub-Configurations ---
 
 class MonteCarloConfig(BaseModel):
@@ -418,6 +423,10 @@ class ExplorationConfig(BaseModel):
     timestep: float = Field(1.0, description="Timestep in fs")
     snapshot_interval: int = Field(100, description="Interval for saving snapshots")
 
+    # New Fields
+    execution_timeout: int = Field(3600, description="Timeout for simulation in seconds")
+    thermostat: ThermostatType = Field(ThermostatType.LANGEVIN, description="Thermostat type for NVT (langevin, berendsen, nose_hoover)")
+
     ensemble: EnsembleType = Field(EnsembleType.AUTO, description="MD Ensemble (AUTO, NVT, NPT)")
     mc_config: Optional[MonteCarloConfig] = Field(default_factory=lambda: MonteCarloConfig(enabled=False), description="Monte Carlo Configuration")
     zbl_config: Optional[ZBLConfig] = Field(default_factory=lambda: ZBLConfig(enabled=False), description="ZBL Potential Configuration")
@@ -470,4 +479,3 @@ class AppConfig(BaseModel):
     sampling: SamplingConfig
     output_dir: str = Field("output", description="Directory to save results")
     seed: int = Field(42, description="Random seed")
-
