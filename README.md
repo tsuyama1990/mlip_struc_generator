@@ -87,6 +87,36 @@ python main_gui.py
 ```
 Open your browser at `http://localhost:5006`.
 
+## Tutorials
+
+A comprehensive set of tutorials is available in the `tutorials/` directory. Each tutorial demonstrates specific features of the pipeline.
+
+### 1. Basic Alloy System (`01_alloy_fe_pt`)
+Generates an Iron-Platinum alloy, demonstrating basic alloy configuration and generation.
+```bash
+python main.py --config-path $(pwd)/tutorials/01_alloy_fe_pt --config-name config
+```
+
+### 2. Ionic System (`02_ionic_sio2`)
+Generates Silicon Dioxide (SiO2), demonstrating how to handle ionic systems with oxidation states.
+```bash
+python main.py --config-path $(pwd)/tutorials/02_ionic_sio2 --config-name config
+```
+
+### 3. Loading User Files (`05_file_loading`)
+Demonstrates how to load external structure files (XYZ, CIF), create supercells, and inject vacancies.
+```bash
+python main.py --config-path $(pwd)/tutorials/05_file_loading --config-name config
+```
+
+### 4. Knowledge-Based Generation (`06_knowledge_generation`)
+Uses `pymatgen` and Crystallography Open Database (COD) logic to generate structures from chemical formulas (e.g., "LiFe0.5Co0.5O2") using smart doping and symmetry strategies.
+```bash
+python main.py --config-path $(pwd)/tutorials/06_knowledge_generation --config-name config
+```
+
+*Note: For MD exploration in tutorials, the configuration often defaults to `emt` or light-weight settings. To use ML potentials like MACE, ensure you have the optional dependencies installed (`uv pip install "nnp_gen[ml-calculators]"`).*
+
 ## Features Logic
 
 ### Smart Doping & MC
