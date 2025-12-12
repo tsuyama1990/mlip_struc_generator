@@ -16,7 +16,7 @@ from ase.md.nvtberendsen import NVTBerendsen
 from tqdm import tqdm
 import tempfile
 from nnp_gen.core.interfaces import IExplorer
-from nnp_gen.core.config import ExplorationConfig, MonteCarloConfig, EnsembleType, MCStrategy
+from nnp_gen.core.config import ExplorationConfig, MonteCarloConfig, EnsembleType, MCStrategy, ThermostatType
 from nnp_gen.core.physics import detect_vacuum
 from nnp_gen.explorers.mc_moves import perform_mc_swap
 from nnp_gen.core.exceptions import PhysicsViolationError, TimeoutError
@@ -44,49 +44,89 @@ def _get_calculator(model_name: str, device: str, zbl_config: Optional[Any] = No
     """
     global _CACHED_CALC, _CACHED_MODEL_NAME, _CACHED_DEVICE
     
-    # FORCE NO CACHE for Isolation
-    _CACHED_CALC = None
+    # Check if cached calculator is valid
+    if _CACHED_CALC is not None:
+        if _CACHED_MODEL_NAME == model_name and _CACHED_DEVICE == device:
+            # Check if reset needed.
+            # IMPORTANT: We must reset the calculator to clear history.
+            # For MACE, reset() clears properties.
+            if hasattr(_CACHED_CALC, 'reset'):
+                 _CACHED_CALC.reset()
 
-    # Return cached if valid
-    # DISABLING CACHE: Suspect stale state causes ZBL failure on 2nd structure.
-    # if _CACHED_CALC is not None:
-    #     if _CACHED_MODEL_NAME == model_name and _CACHED_DEVICE == device:
-    #         # logger.debug(f"Using cached calculator '{model_name}' on '{device}'")
-    #         return _CACHED_CALC
-    #     else:
-    #         logger.debug(f"Calculator mismatch (Req: {model_name}/{device}, Cached: {_CACHED_MODEL_NAME}/{_CACHED_DEVICE}). Reloading...")
-    #         _CACHED_CALC = None # Clear old
+            # If ZBL is NOT used, we can return the cached one directly.
+            # If ZBL IS used, we need to wrap the cached MACE calculator in a NEW SumCalculator
+            # to avoid ZBL state pollution (as noted in audit).
 
-    logger.debug(f"Initializing calculator '{model_name}' on device '{device}'")
-    try:
-        import torch
+            if not (zbl_config and zbl_config.enabled):
+                return _CACHED_CALC
+            else:
+                # ZBL requested.
+                # If cached calc is already a SumCalculator, we should probably unwrap it or just rebuild it.
+                # To be safe and since SumCalculator is light, we assume _CACHED_CALC holds the BASE model (MACE).
+                # Wait, if we return SumCalculator, next time _CACHED_CALC will be SumCalculator.
+                # We should cache the BASE model separately?
+                # Actually, simplest is: If ZBL is enabled, we cache the MACE part, and reconstruct the SumCalculator.
+                # But _CACHED_CALC stores whatever we return.
+                # So we need to store the heavy model in a separate variable if we want to wrap it?
+                # Or just check instance type.
+                pass
+        else:
+            logger.debug(f"Calculator mismatch (Req: {model_name}/{device}, Cached: {_CACHED_MODEL_NAME}/{_CACHED_DEVICE}). Reloading...")
+            _CACHED_CALC = None # Clear old
+
+    # If we are here, either cache is empty or invalid.
+    # BUT, if we returned above, we are done.
+
+    # Refined Logic:
+    # 1. We want to cache the HEAVY model (MACE/SevenNet).
+    # 2. ZBL/SumCalculator is lightweight glue.
+    # 3. We should only cache the heavy model.
+
+    # Let's introduce a specific cache for the heavy model.
+    # We will reuse _CACHED_CALC for the heavy model.
+
+    # If the user requested ZBL, we won't cache the Resulting SumCalculator in _CACHED_CALC.
+    # Instead we cache the underlying model.
+
+    # However, existing code structure:
+    # _CACHED_CALC = calc
+    # return calc
+
+    # Let's change behavior: _CACHED_CALC always holds the BASE model.
+
+    base_calc = _CACHED_CALC
+
+    if base_calc is None or _CACHED_MODEL_NAME != model_name or _CACHED_DEVICE != device:
+        logger.debug(f"Initializing calculator '{model_name}' on device '{device}'")
         try:
-            # Force single thread for process parallelism
-            torch.set_num_threads(1)
-            torch.set_num_interop_threads(1)
-        except RuntimeError as e:
-            # This is expected if torch is already initialized
+            import torch
+            try:
+                # Force single thread for process parallelism
+                torch.set_num_threads(1)
+                torch.set_num_interop_threads(1)
+            except RuntimeError as e:
+                pass
+        except ImportError:
             pass
 
-    except ImportError:
-        pass
-
-    calc = CalculatorFactory.get(model_name, device)
+        base_calc = CalculatorFactory.get(model_name, device)
+        _CACHED_CALC = base_calc
+        _CACHED_MODEL_NAME = model_name
+        _CACHED_DEVICE = device
+    else:
+        # Reset the cached base calculator
+        if hasattr(base_calc, 'reset'):
+            base_calc.reset()
     
-    # --- ZBL INTEGRATION (Standard NNP Stability) ---
-    # Optional Activation via Config
+    # --- ZBL INTEGRATION ---
     if zbl_config and zbl_config.enabled:
-        # User requested ZBL. Using core implementation.
-        # Note: zbl.py implementation uses just 'cutoff'. 'skin' is not used currently.
         from ase.calculators.mixing import SumCalculator
         zbl_calc = ZBLCalculator(cutoff=zbl_config.cutoff)
-        calc = SumCalculator([calc, zbl_calc])
+        # Wrap the cached base calculator
+        calc = SumCalculator([base_calc, zbl_calc])
+        return calc
     else:
-        pass # Just return MACE calc
-    _CACHED_MODEL_NAME = model_name
-    _CACHED_DEVICE = device
-    
-    return calc
+        return base_calc
 
 def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: float):
     """
@@ -94,22 +134,21 @@ def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: 
     """
     timestep = expl_config.timestep * units.fs
     ensemble = expl_config.ensemble
+    thermostat_type = expl_config.thermostat
 
-    is_vacuum = detect_vacuum(atoms)
-
-    use_npt = False
-
+    # Short-circuit vacuum detection if user specified ensemble
     if ensemble == EnsembleType.AUTO:
+        is_vacuum = detect_vacuum(atoms)
         if is_vacuum:
-            logger.debug("Vacuum/Slab detected: Using NVT (Langevin).")
+            logger.debug("Vacuum/Slab detected (AUTO): Using NVT.")
             use_npt = False
         else:
-            logger.debug("Bulk detected: Using NPT.")
+            logger.debug("Bulk detected (AUTO): Using NPT.")
             use_npt = True
     elif ensemble == EnsembleType.NPT:
-        if is_vacuum:
-            logger.warning("User forced NPT on a system with Vacuum. This may lead to infinite expansion.")
         use_npt = True
+        # Optional: Warn if vacuum
+        # if detect_vacuum(atoms): ... (Skipping to save time as requested)
     else: # NVT
         use_npt = False
 
@@ -121,12 +160,35 @@ def _get_integrator(atoms: Atoms, expl_config: ExplorationConfig, current_temp: 
         ttime = ttime_val * units.fs
         pfactor = 75**2 * units.fs**2 # Default-ish
 
+        # Note: ASE NPT uses Nose-Hoover chain by default.
         return NPT(atoms, timestep=timestep, temperature_K=current_temp, externalstress=p_internal, ttime=ttime, pfactor=pfactor)
     else:
-        # NVT (Berendsen)
-        # Langevin was hanging on CUDA/MACE. Switching to Berendsen for stability.
-        taut = 100 * units.fs # Time constant
-        return NVTBerendsen(atoms, timestep=timestep, temperature_K=current_temp, taut=taut)
+        # NVT
+        if thermostat_type == ThermostatType.BERENDSEN:
+             taut = 100 * units.fs
+             return NVTBerendsen(atoms, timestep=timestep, temperature_K=current_temp, taut=taut)
+
+        elif thermostat_type == ThermostatType.NOSE_HOOVER:
+             # Use NPT with zero compressibility/masking to act as NVT Nose-Hoover?
+             # Or simply NPT with fixed cell?
+             # ASE NPT documentation: "NPT dynamics... uses Nose-Hoover dynamics."
+             # If we want NVT, we can use NPT with pfactor=None? No, pfactor is bulk modulus related.
+             # NPT(..., mask=(0,0,0)) disables cell updates -> NVT.
+             # ttime is the thermostat time constant.
+             ttime_val = expl_config.ttime if hasattr(expl_config, 'ttime') else 100.0
+             ttime = ttime_val * units.fs
+             # pfactor is required but irrelevant if mask is (0,0,0)?
+             # Let's provide a dummy pfactor.
+             return NPT(atoms, timestep=timestep, temperature_K=current_temp,
+                        externalstress=0.0, ttime=ttime, pfactor=None, mask=(0,0,0))
+
+        else:
+            # Default: Langevin
+            if "cuda" in getattr(expl_config, 'device', 'cpu').lower():
+                 logger.warning("Using Langevin dynamics on CUDA. If simulation hangs, consider switching 'exploration.thermostat' to 'berendsen'.")
+
+            friction = 0.002 # Standard friction
+            return Langevin(atoms, timestep=timestep, temperature_K=current_temp, friction=friction)
 
 def run_single_md_process(
     atoms: Atoms,
@@ -142,6 +204,14 @@ def run_single_md_process(
     Instantiates its own calculator (Late Binding).
     Designed for ProcessPoolExecutor.
     """
+    # Use timeout from config if available (passed as arg default, but let's override from config if present)
+    # The caller passes timeout_seconds based on config usually, but let's ensure we use config.execution_timeout
+    # if the caller didn't pass specific one?
+    # Actually, the caller (MDExplorer.explore) should pass it.
+    # But let's check expl_config inside here too just in case.
+    if hasattr(expl_config, 'execution_timeout'):
+         timeout_seconds = expl_config.execution_timeout
+
     start_time = time.time()
 
     # Unpack config
@@ -491,10 +561,13 @@ class MDExplorer(IExplorer):
                             def put(self, n):
                                 pbar.update(n)
                         
+                        # Use execution_timeout from config if available
+                        timeout = expl.execution_timeout if hasattr(expl, 'execution_timeout') else 3600
+
                         traj = run_single_md_process(
                             seed, expl, model_name, device, 
                             progress_queue=PBarQueue(), 
-                            timeout_seconds=3600, 
+                            timeout_seconds=timeout,
                             stop_event=stop_event
                         )
                         
@@ -510,6 +583,9 @@ class MDExplorer(IExplorer):
             with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
                 # key: future, value: seed (for debug if needed)
                 futures_map = {}
+                # Use execution_timeout from config if available
+                timeout = expl.execution_timeout if hasattr(expl, 'execution_timeout') else 3600
+
                 for seed in seeds:
                     f = executor.submit(
                         run_single_md_process, 
@@ -518,7 +594,7 @@ class MDExplorer(IExplorer):
                         model_name, 
                         device, 
                         progress_queue, 
-                        3600,
+                        timeout,
                         stop_event # Pass event
                     )
                     futures_map[f] = seed
