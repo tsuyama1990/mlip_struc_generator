@@ -24,8 +24,8 @@ class KnowledgeBasedGenerator(BaseGenerator):
     3. Fallback to random symmetry generation (Pyxtal).
     """
 
-    def __init__(self, config: KnowledgeSystemConfig):
-        super().__init__(config)
+    def __init__(self, config: KnowledgeSystemConfig, seed: int = 42):
+        super().__init__(config, seed=seed)
         self.config: KnowledgeSystemConfig = config
 
     def _generate_impl(self) -> List[Atoms]:

@@ -69,14 +69,14 @@ class AlloyGenerator(BaseGenerator):
 
         try:
             if sg == 229: # BCC
-                prim = bulk('Fe', 'bcc', a=a)
+                prim = bulk('Fe', 'bcc', a=a, cubic=True)
             elif sg == 225 or sg is None: # FCC default
                 # Use first element as dummy species
-                prim = bulk('Cu', 'fcc', a=a)
+                prim = bulk('Cu', 'fcc', a=a, cubic=True)
             else:
                 # Basic support for now
                 logger.warning(f"Unsupported spacegroup {sg}, defaulting to FCC")
-                prim = bulk('Cu', 'fcc', a=a)
+                prim = bulk('Cu', 'fcc', a=a, cubic=True)
         except Exception as e:
             logger.error(f"Failed to build primitive cell: {e}")
             return []

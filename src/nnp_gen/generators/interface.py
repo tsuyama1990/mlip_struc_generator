@@ -13,9 +13,9 @@ from nnp_gen.core.exceptions import GenerationError
 logger = logging.getLogger(__name__)
 
 class InterfaceGenerator(BaseGenerator):
-    def __init__(self, config: InterfaceSystemConfig):
+    def __init__(self, config: InterfaceSystemConfig, seed: int = 42):
         # We initialize BaseGenerator normally
-        super().__init__(config)
+        super().__init__(config, seed=seed)
         self.config = config
 
         # 1. Parse Sub-Configs
