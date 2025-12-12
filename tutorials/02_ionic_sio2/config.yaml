@@ -1,33 +1,69 @@
 output_dir: tutorials/02_ionic_sio2/output
 seed: 456
 
+# -----------------------------------------------------------------------------
+# System Configuration
+# -----------------------------------------------------------------------------
 system:
   type: ionic
   elements: [Si, O]
   oxidation_states:
     Si: 4
     O: -2
+
+  # Structure Generation
+  # Use typical Quartz density ~2.65 g/cm^3
+  # Constraints will handle this, but volume scaling helps.
+
   constraints:
-    max_atoms: 100
-    min_density: 1.5
+    max_atoms: 500
+    min_density: 1.5   # Lower bound
     min_distance: 1.2
     min_cell_length_factor: 1.0
     r_cut: 4.0
+
   pbc: [true, true, true]
-  rattle_std: 0.02
-  vol_scale_range: [0.90, 1.10]
-  supercell_size: [2, 2, 2]
+  rattle_std: 0.1 # Increase rattle for more initial diversity
+  vol_scale_range: [0.90, 1.20] # Explore larger volumes (amorphous)
+  supercell_size: [3, 3, 3] # Larger supercell
   charge_balance_tolerance: 0.0
 
+  n_initial_structures: 10
+  n_surface_samples: 2 # Generate surfaces to test SiO2 slabs
+
+# -----------------------------------------------------------------------------
+# Exploration (MD / Melt-Quench)
+# -----------------------------------------------------------------------------
 exploration:
   method: md
   model_name: mace
-  temperature: 500
-  steps: 50
-  timestep: 1.0
+  device: cpu # or cuda
 
+  # Melt-Quench Protocol
+  temperature_mode: gradient
+  temp_start: 4000 # Start very hot (Melt)
+  temp_end: 300    # Quench to room temp
+  temperature: 300 # Fallback
+
+  steps: 5000 # Enough time to equilibrate and quench
+  timestep: 1.0
+  snapshot_interval: 50
+  ensemble: AUTO
+
+  # Ionic systems don't swap well (Charge violation), but Vacancy Hopping works
+  mc_config:
+    enabled: true
+    strategy: [VACANCY_HOP]
+    swap_interval: 50
+    # No swap_pairs needed for Vacancy Hop, but if we had impurities:
+    # swap_pairs: [[Si, Ge]]
+    temp: null
+
+# -----------------------------------------------------------------------------
+# Sampling
+# -----------------------------------------------------------------------------
 sampling:
-  strategy: random
-  n_samples: 5
+  strategy: fps
+  n_samples: 100
   descriptor_type: soap
-  min_distance: 1.5
+  min_distance: 1.2

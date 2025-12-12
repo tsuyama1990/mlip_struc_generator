@@ -1,0 +1,74 @@
+output_dir: tutorials/04_interface_cu_ni/output
+seed: 101112
+
+# -----------------------------------------------------------------------------
+# System Configuration
+# -----------------------------------------------------------------------------
+system:
+  type: interface
+  mode: hetero_crystal # Solid-Solid Interface
+
+  # Phase A: Copper (Substrate)
+  phase_a:
+    type: alloy
+    elements: [Cu]
+    lattice_constant: 3.61
+    spacegroup: 225
+    supercell_size: [2, 2, 4]
+    pbc: [true, true, true]
+
+  # Phase B: Nickel (Film)
+  phase_b:
+    type: alloy
+    elements: [Ni]
+    lattice_constant: 3.52
+    spacegroup: 225
+    supercell_size: [2, 2, 4]
+    pbc: [true, true, true]
+
+  # Interface Physics
+  vacuum: 15.0
+  interface_distance: 2.2
+  max_mismatch: 0.10 # Allow 10% mismatch
+
+  constraints:
+    max_atoms: 300
+    min_density: 0.0 # Vacuum present
+    min_distance: 1.8
+    r_cut: 4.0
+    min_cell_length_factor: 1.0
+
+  rattle_std: 0.02
+  vol_scale_range: [0.98, 1.02] # Minimal scaling for interfaces
+
+# -----------------------------------------------------------------------------
+# Exploration
+# -----------------------------------------------------------------------------
+exploration:
+  method: md
+  model_name: emt # EMT works great for Cu/Ni and is fast
+  device: cpu
+
+  temperature_mode: gradient
+  temp_start: 800  # Anneal interface
+  temp_end: 300
+
+  steps: 2000
+  timestep: 2.0
+  snapshot_interval: 20
+  ensemble: NVT # Keep volume fixed (with vacuum) to preserve interface
+
+  mc_config:
+    enabled: true
+    strategy: [SWAP]
+    swap_interval: 20
+    swap_pairs: [[Cu, Ni]] # Allow intermixing at interface
+
+# -----------------------------------------------------------------------------
+# Sampling
+# -----------------------------------------------------------------------------
+sampling:
+  strategy: fps
+  n_samples: 50
+  descriptor_type: soap
+  min_distance: 1.5

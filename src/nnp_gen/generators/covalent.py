@@ -9,8 +9,8 @@ from nnp_gen.core.physics import apply_vacancies
 logger = logging.getLogger(__name__)
 
 class CovalentGenerator(BaseGenerator):
-    def __init__(self, config: CovalentSystemConfig):
-        super().__init__(config)
+    def __init__(self, config: CovalentSystemConfig, seed: int = 42):
+        super().__init__(config, seed=seed)
         self.config = config
 
     def _generate_impl(self) -> List[Atoms]:

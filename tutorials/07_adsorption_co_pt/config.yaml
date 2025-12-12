@@ -1,0 +1,73 @@
+output_dir: tutorials/07_adsorption_co_pt/output
+seed: 999
+
+# -----------------------------------------------------------------------------
+# System Configuration
+# -----------------------------------------------------------------------------
+system:
+  type: vacuum_adsorbate
+
+  # Substrate: Platinum (111)
+  substrate:
+    type: alloy
+    elements: [Pt]
+    lattice_constant: 3.92
+    spacegroup: 225
+    supercell_size: [3, 3, 3] # Base supercell before cutting
+    pbc: [true, true, true]
+
+  miller_indices: [[1, 1, 1]]
+  layers: 4
+  vacuum: 12.0
+  defect_rate: 0.05 # 5% Surface defects
+
+  n_initial_structures: 5
+
+  # Adsorbates: CO molecules
+  adsorbates:
+    - source: "CO" # SMILES or Formula
+      mode: smiles
+      count: 4
+      height: 2.5
+    - source: "O"
+      mode: atom
+      count: 2
+      height: 2.0
+
+  constraints:
+    max_atoms: 200
+    min_density: 0.0
+    min_distance: 1.5
+    r_cut: 4.0
+    min_cell_length_factor: 1.0
+
+  rattle_std: 0.02
+  vol_scale_range: [1.0, 1.0]
+
+# -----------------------------------------------------------------------------
+# Exploration
+# -----------------------------------------------------------------------------
+exploration:
+  method: md
+  model_name: mace
+  device: cpu
+
+  temperature_mode: constant
+  temperature: 400 # Surface diffusion
+
+  steps: 2000
+  timestep: 1.0
+  snapshot_interval: 20
+  ensemble: NVT
+
+  mc_config:
+    enabled: false # No MC for now, just MD diffusion
+
+# -----------------------------------------------------------------------------
+# Sampling
+# -----------------------------------------------------------------------------
+sampling:
+  strategy: fps
+  n_samples: 50
+  descriptor_type: soap
+  min_distance: 1.5

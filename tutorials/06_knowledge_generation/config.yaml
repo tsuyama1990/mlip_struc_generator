@@ -1,37 +1,65 @@
+output_dir: tutorials/06_knowledge_generation/output
+seed: 42
+
+# -----------------------------------------------------------------------------
+# System Configuration
+# -----------------------------------------------------------------------------
 system:
   type: knowledge
-  # Complex doped system
-  formula: "LiFe0.5Co0.5O2"
+  # Complex doped system: Lithium Iron Phosphate (Cathode material)
+  formula: "LiFePO4"
 
   # Strategies
-  use_cod: true
-  use_prototypes: true
-  use_symmetry_generation: true
+  use_cod: true          # Try to find experimental structure
+  use_prototypes: true   # Or match to Olivine prototype
+  use_symmetry_generation: true # Or fallback to random symmetry
 
   # Safety Constraints
-  max_supercell_atoms: 300  # Allow enough room for supercell ordering
+  max_supercell_atoms: 300
 
-  # Optional: Explicitly list elements if you want to override auto-detection
-  # elements: ["Li", "Fe", "Co", "O"]
+  constraints:
+    max_atoms: 300
+    min_density: 2.0
+    min_distance: 1.2
+    r_cut: 4.0
+    min_cell_length_factor: 1.0
 
+  pbc: [true, true, true]
+  rattle_std: 0.05
+  vol_scale_range: [0.95, 1.05]
+
+# -----------------------------------------------------------------------------
+# Exploration
+# -----------------------------------------------------------------------------
 exploration:
   method: md
-  temperature: 600  # High temp to test stability
-  steps: 500
-  ensemble: nvt # Surface/Disordered systems are safer in NVT initially
+  model_name: mace
+  device: cpu
 
-  # Enable MC to mix the Fe/Co dopants
+  temperature_mode: gradient
+  temp_start: 600
+  temp_end: 300
+
+  steps: 2000
+  timestep: 1.0
+  snapshot_interval: 20
+  ensemble: NPT # Allow volume relaxation for unknown structures
+
+  # Enable MC to check Li mobility (Vacancy Hop) or Fe/Li antisites (Swap)
   mc_config:
     enabled: true
-    swap_interval: 10
-    swap_pairs: [["Fe", "Co"]]
-    allow_charge_mismatch: false # Strict safety
+    strategy: [VACANCY_HOP]
+    swap_interval: 50
+    # swap_pairs: [[Li, Fe]] # Potential anti-site defect
+    # allow_charge_mismatch: true # Li+ vs Fe2+ might need charge comp, but for raw swap allow it?
+                                # Actually, better to stick to safe moves or just vacancy hop.
+                                # Let's just do Vacancy Hop for Li diffusion simulation.
 
+# -----------------------------------------------------------------------------
+# Sampling
+# -----------------------------------------------------------------------------
 sampling:
   strategy: fps
   n_samples: 50
   descriptor_type: soap
   min_distance: 1.5
-
-output_dir: tutorials/06_knowledge_generation/output
-seed: 42

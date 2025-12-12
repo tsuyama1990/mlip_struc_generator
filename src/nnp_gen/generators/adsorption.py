@@ -29,8 +29,8 @@ from nnp_gen.core.exceptions import GenerationError
 logger = logging.getLogger(__name__)
 
 class VacuumAdsorbateGenerator(BaseGenerator):
-    def __init__(self, config: VacuumAdsorbateSystemConfig):
-        super().__init__(config)
+    def __init__(self, config: VacuumAdsorbateSystemConfig, seed: int = 42):
+        super().__init__(config, seed=seed)
         self.config = config
 
         # Instantiate sub-generator
@@ -232,8 +232,8 @@ class VacuumAdsorbateGenerator(BaseGenerator):
 
 
 class SolventAdsorbateGenerator(VacuumAdsorbateGenerator):
-    def __init__(self, config: SolventAdsorbateSystemConfig):
-        super().__init__(config)
+    def __init__(self, config: SolventAdsorbateSystemConfig, seed: int = 42):
+        super().__init__(config, seed=seed)
         self.config = config
 
     def _generate_impl(self) -> List[Atoms]:
