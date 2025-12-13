@@ -29,7 +29,8 @@ def test_pipeline_integration_alloy_emt(output_dir):
             model_name="emt",
             steps=50, # Short run
             timestep=1.0,
-            temperature=300
+            temperature=300,
+            snapshot_interval=5 # Ensure we capture enough frames
         ),
         sampling=SamplingConfig(
             strategy="random", # Use random to avoid descriptor dependency issues if dscribe missing

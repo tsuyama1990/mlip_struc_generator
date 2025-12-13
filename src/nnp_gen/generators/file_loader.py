@@ -4,10 +4,14 @@ from typing import List, Optional
 from ase import Atoms
 import ase.io
 from nnp_gen.core.interfaces import BaseGenerator
+from nnp_gen.core.exceptions import GenerationError
+from nnp_gen.core.physics import apply_vacancies
 
 import os
 import glob
 from nnp_gen.core.config import FileSystemConfig
+
+logger = logging.getLogger(__name__)
 
 class FileGenerator(BaseGenerator):
     """

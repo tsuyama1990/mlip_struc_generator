@@ -4,10 +4,10 @@ from nnp_gen.core.config import AppConfig
 from nnp_gen.pipeline.runner import PipelineRunner
 from ase import Atoms
 
-def test_pipeline_run(mocker):
+def test_pipeline_run(mocker, tmp_path):
     # Setup config
     conf_dict = {
-        "output_dir": "test_out",
+        "output_dir": str(tmp_path / "test_out"),
         "seed": 42,
         "system": {
             "type": "alloy",
@@ -50,8 +50,8 @@ def test_pipeline_run(mocker):
     mock_db = mock_db_cls.return_value
     mock_db.bulk_save.return_value = [1]
 
-    # OS
-    mocker.patch("os.makedirs")
+    # Don't mock os.makedirs, use real fs with tmp_path
+    # mocker.patch("os.makedirs")
 
     runner = PipelineRunner(config)
     runner.run()
