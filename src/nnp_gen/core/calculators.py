@@ -29,6 +29,13 @@ class CalculatorFactory:
 def build_mace(device: str, kwargs: Dict[str, Any]) -> Calculator:
     try:
         from mace.calculators import mace_mp
+        import torch
+        
+        # Check if CUDA is requested but not available
+        if device == "cuda" and not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available. Falling back to CPU.")
+            device = "cpu"
+        
         model_type = kwargs.get('model_paths', 'small')
         return mace_mp(model=model_type, device=device, default_dtype="float32")
     except ImportError:
@@ -36,6 +43,13 @@ def build_mace(device: str, kwargs: Dict[str, Any]) -> Calculator:
 
 def build_sevenn(device: str, kwargs: Dict[str, Any]) -> Calculator:
     from sevenn.calculators import SevenNetCalculator
+    import torch
+    
+    # Check if CUDA is requested but not available
+    if device == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA requested but not available. Falling back to CPU.")
+        device = "cpu"
+    
     return SevenNetCalculator(model=kwargs.get('model', '7net-0'), device=device)
 
 def build_emt(device: str, kwargs: Dict[str, Any]) -> Calculator:

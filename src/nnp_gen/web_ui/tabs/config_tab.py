@@ -54,7 +54,7 @@ class ConfigViewModel(param.Parameterized):
     # --- Ensemble ---
     ensemble = param.Selector(objects=["AUTO", "NVT", "NPT"], default="AUTO")
     # Using lowercase to match Enum values exactly
-    thermostat = param.Selector(objects=["langevin", "berendsen", "nose_hoover"], default="langevin", doc="Thermostat Type")
+    thermostat = param.Selector(objects=["langevin", "berendsen", "nose_hoover"], default="nose_hoover", doc="Thermostat Type")
     pressure = param.Number(default=None, bounds=(0.0, 1000.0), doc="Pressure (GPa) for NPT")
     ttime = param.Number(default=100.0, doc="Thermostat Time (fs)")
 
@@ -84,7 +84,7 @@ class ConfigViewModel(param.Parameterized):
     min_cell_length_factor = param.Number(default=1.0, bounds=(0.1, 5.0))
 
     # Alloy Specifics
-    composition_mode = param.Selector(objects=["random", "balanced", "range"], default="random")
+    composition_mode = param.Selector(objects=["random", "balanced", "range"], default="range")
     # Simplification: For range mode, we might need a text input or dynamic UI. 
     # For now, let's rely on config.yaml for complex range dicts, 
     # OR provide a simple text area for 'Fe: 0.1-0.9, Pt: 0.1-0.9'
@@ -138,13 +138,13 @@ class ConfigViewModel(param.Parameterized):
                     self.param.composition_mode,
                     widgets={'composition_mode': pn.widgets.Select}
                 ),
-                pn.Param(self.param.composition_ranges_input, name="Comp Ranges (if range mode)"),
+                pn.Param(self.param.composition_ranges_input, name="Comp Ranges (auto-filled, e.g. Fe:0.1-0.9, Pt:0.1-0.9)"),
                 pn.Param(
                     self.param.alloy_lattice_constant, 
                     name="Lattice Constant",
-                    widgets={'alloy_lattice_constant': pn.widgets.EditableFloatSlider}
+                    widgets={'alloy_lattice_constant': {'type': pn.widgets.EditableFloatSlider, 'format': '0.000'}}
                 ),
-                pn.Param(self.param.spacegroup, widgets={'spacegroup': pn.widgets.EditableIntSlider}),
+                pn.Param(self.param.spacegroup, widgets={'spacegroup': {'type': pn.widgets.EditableIntSlider}}),
             )
         elif self.system_type == "molecule":
             help_text = "Generate molecular conformers from SMILES string."
@@ -155,7 +155,7 @@ class ConfigViewModel(param.Parameterized):
             help_text = "Load structures from disk (CIF, XYZ, POSCAR). Use 'Repeat' to create multiple seeds from one file."
             content = pn.Column(
                 pn.Param(self.param.file_path, name="File Path"),
-                pn.Param(self.param.file_repeat, name="Repeat Count", widgets={'file_repeat': pn.widgets.EditableIntSlider}),
+                pn.Param(self.param.file_repeat, name="Repeat Count", widgets={'file_repeat': {'type': pn.widgets.EditableIntSlider}}),
             )
         elif self.system_type == "ionic":
             help_text = "Generate ionic crystals based on oxidation states (Requires pymatgen for prototypes)."
@@ -173,12 +173,12 @@ class ConfigViewModel(param.Parameterized):
         """Dynamic temperature controls."""
         if self.temperature_mode == "constant":
             return pn.Column(
-                pn.Param(self.param.temperature, widgets={'temperature': pn.widgets.EditableFloatSlider}, name="Temperature (K)"),
+                pn.Param(self.param.temperature, widgets={'temperature': {'type': pn.widgets.EditableFloatSlider, 'format': '0.0f'}}, name="Temperature (K)"),
             )
         else:
             return pn.Column(
-                pn.Param(self.param.temp_start, widgets={'temp_start': pn.widgets.EditableFloatSlider}, name="Start Temp (K)"),
-                pn.Param(self.param.temp_end, widgets={'temp_end': pn.widgets.EditableFloatSlider}, name="End Temp (K)"),
+                pn.Param(self.param.temp_start, widgets={'temp_start': {'type': pn.widgets.EditableFloatSlider, 'format': '0.0f'}}, name="Start Temp (K)"),
+                pn.Param(self.param.temp_end, widgets={'temp_end': {'type': pn.widgets.EditableFloatSlider, 'format': '0.0f'}}, name="End Temp (K)"),
             )
     
     @param.depends("ensemble")
@@ -193,8 +193,8 @@ class ConfigViewModel(param.Parameterized):
         if self.ensemble == "NPT":
              return pn.Column(
                  *common_controls,
-                 pn.Param(self.param.pressure, name="Pressure (GPa)", widgets={'pressure': pn.widgets.EditableFloatSlider}),
-                 pn.Param(self.param.ttime, name="Thermostat Time (fs)", widgets={'ttime': pn.widgets.EditableFloatSlider}),
+                 pn.Param(self.param.pressure, name="Pressure (GPa)", widgets={'pressure': {'type': pn.widgets.EditableFloatSlider, 'format': '0.0f'}}),
+                 pn.Param(self.param.ttime, name="Thermostat Time (fs)", widgets={'ttime': {'type': pn.widgets.EditableFloatSlider, 'format': '0.0f'}}),
              )
         return pn.Column(*common_controls)
 
@@ -205,8 +205,8 @@ class ConfigViewModel(param.Parameterized):
 
         return pn.Column(
             pn.pane.Markdown("Configuration for Hybrid MC/MD. Interleaves MC moves with MD steps.", styles={'font-size': '0.9em', 'color': 'gray'}),
-            pn.Param(self.param.mc_swap_interval, name="Swap Interval (steps)", widgets={'mc_swap_interval': pn.widgets.EditableIntSlider}),
-            pn.Param(self.param.mc_swap_pairs_input, name="Swap Pairs (e.g. 'Fe-Pt')"),
+            pn.Param(self.param.mc_swap_interval, name="Swap Interval (steps)", widgets={'mc_swap_interval': {'type': pn.widgets.EditableIntSlider}}),
+            pn.Param(self.param.mc_swap_pairs_input, name="Swap Pairs (auto-filled, e.g. Fe-Pt, Cu-Au)"),
         )
 
     @param.depends("zbl_enabled")
@@ -215,14 +215,14 @@ class ConfigViewModel(param.Parameterized):
             return pn.Column()
         
         return pn.Column(
-            pn.Param(self.param.zbl_cutoff, name="Cutoff (A)", widgets={'zbl_cutoff': pn.widgets.EditableFloatSlider}),
-            pn.Param(self.param.zbl_skin, name="Skin (A)", widgets={'zbl_skin': pn.widgets.EditableFloatSlider}),
+            pn.Param(self.param.zbl_cutoff, name="Cutoff (A)", widgets={'zbl_cutoff': {'type': pn.widgets.EditableFloatSlider, 'format': '0.00'}}),
+            pn.Param(self.param.zbl_skin, name="Skin (A)", widgets={'zbl_skin': {'type': pn.widgets.EditableFloatSlider, 'format': '0.00'}}),
         )
 
-    @param.depends("elements_input", watch=True)
+    @param.depends("elements_input", "composition_mode", watch=True)
     def validate_elements_realtime(self):
         """
-        Validate elements input in real-time.
+        Validate elements input in real-time and auto-populate related fields.
         """
         if not self.elements_input:
             self.status_message = "Ready"
@@ -246,6 +246,7 @@ class ConfigViewModel(param.Parameterized):
              self.status_message = f"⚠️ Invalid elements: {', '.join(invalid)}"
         else:
              self.status_message = "Ready"
+             
              # Auto-estimate lattice constant for Alloy
              if self.system_type == "alloy" and valid_elements:
                  try:
@@ -254,6 +255,17 @@ class ConfigViewModel(param.Parameterized):
                          self.alloy_lattice_constant = round(est_a, 3)
                  except Exception:
                      pass
+                 
+                 # Auto-populate composition ranges for "range" mode
+                 if self.composition_mode == "range" and len(valid_elements) >= 2:
+                     ranges = [f"{el}:0.1-0.9" for el in valid_elements]
+                     self.composition_ranges_input = ", ".join(ranges)
+             
+             # Auto-populate MC swap pairs (all binary combinations)
+             if len(valid_elements) >= 2:
+                 from itertools import combinations
+                 pairs = [f"{el1}-{el2}" for el1, el2 in combinations(valid_elements, 2)]
+                 self.mc_swap_pairs_input = ", ".join(pairs)
 
     def get_pydantic_config(self) -> AppConfig:
         """
@@ -313,8 +325,8 @@ class ConfigViewModel(param.Parameterized):
             
             if self.composition_mode == "range" and self.composition_ranges_input:
                 ranges = {}
-                # Parse "Fe:0.1-0.9; Pt:0.1-0.9"
-                parts = self.composition_ranges_input.split(";")
+                # Parse "Fe:0.1-0.9, Pt:0.1-0.9" (comma-separated)
+                parts = self.composition_ranges_input.split(",")
                 for p in parts:
                     if ":" in p:
                         el, r = p.split(":")
@@ -351,7 +363,7 @@ class ConfigViewModel(param.Parameterized):
             mc_data["swap_interval"] = self.mc_swap_interval
             # Strategy defaults to SWAP if not present
             
-            # Parse Pairs
+            # Parse Pairs (comma-separated, no quotes needed)
             if self.mc_swap_pairs_input:
                 pairs = []
                 # Simple parser: "Fe-Pt, A-B" -> [('Fe', 'Pt'), ('A', 'B')]
@@ -359,8 +371,8 @@ class ConfigViewModel(param.Parameterized):
                 for r in raw:
                     parts = r.strip().split("-")
                     if len(parts) == 2:
-                        el1 = parts[0].strip().strip('"').strip("'")
-                        el2 = parts[1].strip().strip('"').strip("'")
+                        el1 = parts[0].strip()
+                        el2 = parts[1].strip()
                         pairs.append([el1, el2])
                 if pairs:
                     mc_data["swap_pairs"] = pairs
@@ -556,42 +568,69 @@ class ConfigViewModel(param.Parameterized):
         if self._last_job_id:
             content = self.job_manager.get_log_content(self._last_job_id)
             if content != self.logs:
-                # Filter tqdm carriage returns to prevent weird display
-                # Replace lines ending with \r with just the last line? 
-                # TQDM uses \r to overwrite lines. In a text area, we see them all.
-                # Regex: Replace (anything)\r with empty string? No, we want the LAST one.
-                # Simpler: Just remove \r characters to at least stop line breaking weirdness, 
-                # though it will show history.
-                # Better: Filter lines.
-                clean_content = content.replace("\r", "\n") 
+                # Intelligently filter TQDM progress updates to show only meaningful information
+                import re
+                
+                lines = content.split('\n')
+                filtered_lines = []
+                last_tqdm_line = None
+                
+                for line in lines:
+                    # Check if this is a TQDM progress line (contains progress bar characters)
+                    if re.search(r'\d+%\|[▏▎▍▌▋▊▉█\s]+\|', line):
+                        # Keep only the last TQDM line for each type
+                        last_tqdm_line = line
+                    elif 'MD Exploration Steps:' in line:
+                        # This is a TQDM line, keep only the latest
+                        last_tqdm_line = line
+                    else:
+                        # Not a TQDM line - keep it
+                        # But first, add the last TQDM line if we have one
+                        if last_tqdm_line and last_tqdm_line not in filtered_lines:
+                            filtered_lines.append(last_tqdm_line)
+                            last_tqdm_line = None
+                        
+                        # Keep important log lines
+                        if line.strip():  # Non-empty lines
+                            filtered_lines.append(line)
+                
+                # Add final TQDM line if exists
+                if last_tqdm_line:
+                    filtered_lines.append(last_tqdm_line)
+                
+                clean_content = '\n'.join(filtered_lines)
                 self.logs = clean_content
 
             status = self.job_manager.get_status(self._last_job_id)
             if status == "running":
-                 if "Step 1: Structure Generation" in content:
-                     self.status_message = "Step 1: Structure Generation..."
-                     self.progress_value = max(self.progress_value, 25)
-                 if "Step 2: Exploration" in content:
-                     self.status_message = "Step 2: Exploration (MD/KMC)..."
-                     self.progress_value = max(self.progress_value, 50)
-                 if "Step 3: Sampling" in content:
-                     self.status_message = "Step 3: Sampling Structures..."
-                     self.progress_value = max(self.progress_value, 75)
-                 if "Step 4: Saving" in content:
-                     self.status_message = "Step 4: Saving Results..."
-                     self.progress_value = max(self.progress_value, 90)
-                 
-                 import re
-                 md_prog_match = re.findall(r"MD Progress: (\d+)/(\d+)", content)
-                 if md_prog_match:
-                     current, total = md_prog_match[-1]
-                     try:
-                         perc = float(current) / float(total)
-                         overall_perc = 50 + (perc * 25)
-                         self.progress_value = max(self.progress_value, int(overall_perc))
-                         self.status_message = f"MD Progress: {current}/{total} steps"
-                     except ZeroDivisionError:
-                         pass
+                import re
+                
+                # Extract current stage from log content
+                if "Step 1: Structure Generation" in content or "Generating initial structures" in content:
+                    self.status_message = "Generating initial structures..."
+                    self.progress_value = max(self.progress_value, 25)
+                elif "Minimization complete" in content or "Step 2: Exploration" in content:
+                    self.status_message = "Running MD exploration..."
+                    self.progress_value = max(self.progress_value, 50)
+                elif "Step 3: Sampling" in content:
+                    self.status_message = "Sampling structures..."
+                    self.progress_value = max(self.progress_value, 75)
+                elif "Step 4: Saving" in content:
+                    self.status_message = "Saving results..."
+                    self.progress_value = max(self.progress_value, 90)
+                
+                # Extract MD progress from TQDM lines
+                md_prog_match = re.findall(r'MD Exploration Steps:\s+(\d+)%\|[^|]+\|\s+(\d+)/(\d+)', content)
+                if md_prog_match:
+                    percent, current, total = md_prog_match[-1]
+                    try:
+                        # Use the percentage from TQDM directly
+                        perc = float(percent) / 100.0
+                        overall_perc = 50 + (perc * 25)  # MD is 50-75% of overall progress
+                        self.progress_value = max(self.progress_value, int(overall_perc))
+                        self.status_message = f"MD Exploration: {current}/{total} steps ({percent}%)"
+                    except (ValueError, ZeroDivisionError):
+                        pass
             elif status == "completed":
                 self.progress_value = 100
                 self.progress_active = False
@@ -685,28 +724,28 @@ class ConfigTab:
                 pn.Param(self.vm.param.output_dir, name="Output Directory"),
                 pn.Param(self.vm.param.system_type),
                 pn.Param(self.vm.param.elements_input),
-                pn.Param(self.vm.param.seed, widgets={'seed': pn.widgets.EditableIntSlider}),
+                pn.Param(self.vm.param.seed, widgets={'seed': {'type': pn.widgets.EditableIntSlider}}),
                 self.vm.system_settings_panel,
                 
                 pn.Card(
-                    pn.Param(self.vm.param.n_initial_structures, widgets={'n_initial_structures': pn.widgets.EditableIntSlider}),
-                    pn.Param(self.vm.param.n_surface_samples, widgets={'n_surface_samples': pn.widgets.EditableIntSlider}),
+                    pn.Param(self.vm.param.n_initial_structures, widgets={'n_initial_structures': {'type': pn.widgets.EditableIntSlider}}),
+                    pn.Param(self.vm.param.n_surface_samples, widgets={'n_surface_samples': {'type': pn.widgets.EditableIntSlider}}),
                     pn.Param(self.vm.param.supercell_input),
                     pn.Param(self.vm.param.pbc_input),
-                    pn.Param(self.vm.param.rattle_std, widgets={'rattle_std': pn.widgets.EditableFloatSlider}),
+                    pn.Param(self.vm.param.rattle_std, widgets={'rattle_std': {'type': pn.widgets.EditableFloatSlider, 'format': '0.000'}}),
                     pn.Row(pn.Param(self.vm.param.vol_scale_min, name="Vol Min"), pn.Param(self.vm.param.vol_scale_max, name="Vol Max")),
                     title="Advanced System Settings", collapsed=True
                 ),
 
                 "### Advanced Physics",
-                pn.Param(self.vm.param.vacancy_concentration, widgets={'vacancy_concentration': pn.widgets.EditableFloatSlider}),
-                pn.Param(self.vm.param.max_atoms, widgets={'max_atoms': pn.widgets.EditableIntSlider}),
-                pn.Param(self.vm.param.min_distance, widgets={'min_distance': pn.widgets.EditableFloatSlider}),
+                pn.Param(self.vm.param.vacancy_concentration, widgets={'vacancy_concentration': {'type': pn.widgets.EditableFloatSlider, 'format': '0.000'}}),
+                pn.Param(self.vm.param.max_atoms, widgets={'max_atoms': {'type': pn.widgets.EditableIntSlider}}),
+                pn.Param(self.vm.param.min_distance, widgets={'min_distance': {'type': pn.widgets.EditableFloatSlider, 'format': '0.00'}}),
                 
                 pn.Card(
-                    pn.Param(self.vm.param.min_density, widgets={'min_density': pn.widgets.EditableFloatSlider}),
-                    pn.Param(self.vm.param.r_cut, widgets={'r_cut': pn.widgets.EditableFloatSlider}),
-                    pn.Param(self.vm.param.min_cell_length_factor, widgets={'min_cell_length_factor': pn.widgets.EditableFloatSlider}),
+                    pn.Param(self.vm.param.min_density, widgets={'min_density': {'type': pn.widgets.EditableFloatSlider, 'format': '0.00'}}),
+                    pn.Param(self.vm.param.r_cut, widgets={'r_cut': {'type': pn.widgets.EditableFloatSlider, 'format': '0.0f'}}),
+                    pn.Param(self.vm.param.min_cell_length_factor, widgets={'min_cell_length_factor': {'type': pn.widgets.EditableFloatSlider, 'format': '0.00'}}),
                     title="Extra Constraints", collapsed=True
                 ),
 
@@ -715,9 +754,9 @@ class ConfigTab:
                 pn.Param(self.vm.param.device, widgets={'device': pn.widgets.RadioButtonGroup}),
                 pn.Param(self.vm.param.temperature_mode, widgets={'temperature_mode': pn.widgets.RadioButtonGroup}),
                 self.vm.exploration_settings_panel,
-                pn.Param(self.vm.param.timestep, widgets={'timestep': pn.widgets.EditableFloatSlider}),
-                pn.Param(self.vm.param.steps, widgets={'steps': pn.widgets.EditableIntSlider}),
-                pn.Param(self.vm.param.snapshot_interval, widgets={'snapshot_interval': pn.widgets.EditableIntSlider}),
+                pn.Param(self.vm.param.timestep, widgets={'timestep': {'type': pn.widgets.EditableFloatSlider, 'format': '0.0f'}}),
+                pn.Param(self.vm.param.steps, widgets={'steps': {'type': pn.widgets.EditableIntSlider}}),
+                pn.Param(self.vm.param.snapshot_interval, widgets={'snapshot_interval': {'type': pn.widgets.EditableIntSlider}}),
                 pn.Param(self.vm.param.ensemble),
                 self.vm.ensemble_settings_panel,
                 pn.Param(self.vm.param.mc_enabled, widgets={'mc_enabled': pn.widgets.Toggle}),
@@ -727,7 +766,7 @@ class ConfigTab:
                 "### Sampling",
                 pn.Param(self.vm.param.sampling_strategy),
                 pn.Param(self.vm.param.sampling_descriptor),
-                pn.Param(self.vm.param.n_samples, widgets={'n_samples': pn.widgets.EditableIntSlider}),
+                pn.Param(self.vm.param.n_samples, widgets={'n_samples': {'type': pn.widgets.EditableIntSlider}}),
                 
                 pn.Row(
                     pn.widgets.Button(
