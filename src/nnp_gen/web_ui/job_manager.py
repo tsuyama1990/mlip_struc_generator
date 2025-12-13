@@ -82,7 +82,7 @@ class JobManager:
         config_path = effective_output_dir / "config.yaml"
         # Use OmegaConf to dump Pydantic model to YAML
         # Convert to container first
-        cfg_container = OmegaConf.create(job_config.model_dump())
+        cfg_container = OmegaConf.create(job_config.model_dump(mode='json'))
         with open(config_path, 'w') as f:
             OmegaConf.save(cfg_container, f)
 
@@ -119,7 +119,13 @@ class JobManager:
         # We assume main.py is in the current working directory or accessible.
         # Better to find absolute path of main.py relative to this file?
         # Assuming run from root of repo:
-        cmd = [sys.executable, "main.py", "--config-path", str(config_dir.absolute()), "--config-name", "config"]
+        cmd = [
+            sys.executable, "main.py", 
+            "--config-path", str(config_dir.absolute()), 
+            "--config-name", "config",
+            f"hydra.run.dir={config_dir.absolute()}",
+            "hydra.job.chdir=False"
+        ]
 
         try:
             with open(log_file_path, 'w') as log_file:

@@ -3,7 +3,7 @@ from nnp_gen.web_ui.tabs.config_tab import ConfigTab
 from nnp_gen.web_ui.tabs.viz_tab import VizTab
 
 def build_app():
-    pn.extension('bokeh', template='material')
+    pn.extension(template='material')
 
     config_tab = ConfigTab()
     viz_tab = VizTab()

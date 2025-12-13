@@ -53,6 +53,8 @@ class ConfigViewModel(param.Parameterized):
 
     # --- Ensemble ---
     ensemble = param.Selector(objects=["AUTO", "NVT", "NPT"], default="AUTO")
+    # Using lowercase to match Enum values exactly
+    thermostat = param.Selector(objects=["langevin", "berendsen", "nose_hoover"], default="langevin", doc="Thermostat Type")
     pressure = param.Number(default=None, bounds=(0.0, 1000.0), doc="Pressure (GPa) for NPT")
     ttime = param.Number(default=100.0, doc="Thermostat Time (fs)")
 
@@ -111,12 +113,18 @@ class ConfigViewModel(param.Parameterized):
     # --- Progress ---
     progress_value = param.Integer(default=0, bounds=(0, 100))
     progress_active = param.Boolean(default=False)
+    # Helper for UI enabling/disabling (Inverse of active)
+    progress_idle = param.Boolean(default=True)
 
     def __init__(self, **params):
         super().__init__(**params)
         self.job_manager = JobManager()
         self._last_job_id = None
         self._raw_config_data = {} # Preserves loaded config to avoid data loss
+
+    @param.depends("progress_active", watch=True)
+    def _sync_idle_state(self):
+        self.progress_idle = not self.progress_active
 
     @param.depends("system_type")
     def system_settings_panel(self):
@@ -175,12 +183,20 @@ class ConfigViewModel(param.Parameterized):
     
     @param.depends("ensemble")
     def ensemble_settings_panel(self):
+        # Always show thermostat for NVT/NPT/AUTO (if supported)
+        # AUTO usually implies NVT/NPT logic anyway.
+        
+        common_controls = [
+            pn.Param(self.param.thermostat, widgets={'thermostat': pn.widgets.Select}),
+        ]
+        
         if self.ensemble == "NPT":
              return pn.Column(
+                 *common_controls,
                  pn.Param(self.param.pressure, name="Pressure (GPa)", widgets={'pressure': pn.widgets.EditableFloatSlider}),
                  pn.Param(self.param.ttime, name="Thermostat Time (fs)", widgets={'ttime': pn.widgets.EditableFloatSlider}),
              )
-        return pn.Column()
+        return pn.Column(*common_controls)
 
     @param.depends("mc_enabled")
     def mc_settings_panel(self):
@@ -360,6 +376,12 @@ class ConfigViewModel(param.Parameterized):
         if self.ttime:
              expl_data["ttime"] = self.ttime
 
+        if self.ttime:
+             expl_data["ttime"] = self.ttime
+
+        # Fix Enum Case Sensitivity
+        expl_data["thermostat"] = self.thermostat.lower()
+
         expl_data["device"] = self.device
 
         # ZBL Config
@@ -454,6 +476,12 @@ class ConfigViewModel(param.Parameterized):
                 if "steps" in expl:
                     self.steps = expl["steps"]
 
+                if "thermostat" in expl:
+                    # Robust loading: handle upper/mixed case
+                    val = str(expl["thermostat"]).lower()
+                    if val in ["langevin", "berendsen", "nose_hoover"]:
+                        self.thermostat = val
+                
                 if "mc_config" in expl and expl["mc_config"].get("enabled", False):
                     self.mc_enabled = True
                     self.mc_swap_interval = expl["mc_config"].get("swap_interval", 100)
@@ -589,11 +617,11 @@ class ConfigTab:
         file_input.param.watch(on_file_upload, "value")
 
         # Run Button
-        run_btn = pn.widgets.Button(name="Run Pipeline", button_type="primary")
-        run_btn.on_click(self.vm.run_pipeline)
+        # run_btn = pn.widgets.Button(name="Run Pipeline", button_type="primary")
+        # run_btn.on_click(self.vm.run_pipeline)
 
-        stop_btn = pn.widgets.Button(name="Stop", button_type="danger")
-        stop_btn.on_click(self.vm.stop_pipeline)
+        # stop_btn = pn.widgets.Button(name="Stop", button_type="danger")
+        # stop_btn.on_click(self.vm.stop_pipeline)
 
         # Progress Bar
         progress_bar = pn.widgets.Progress(
@@ -701,7 +729,23 @@ class ConfigTab:
                 pn.Param(self.vm.param.sampling_descriptor),
                 pn.Param(self.vm.param.n_samples, widgets={'n_samples': pn.widgets.EditableIntSlider}),
                 
-                pn.Row(run_btn, stop_btn),
+                pn.Row(
+                    pn.widgets.Button(
+                        name="Run Job", 
+                        button_type="primary", 
+                        on_click=self.vm.run_pipeline,
+                        disabled=self.vm.param.progress_active,
+                        width=150
+                    ),
+                    pn.widgets.Button(
+                        name="Stop Job", 
+                        button_type="danger", 
+                        on_click=self.vm.stop_pipeline,
+                        disabled=self.vm.param.progress_idle,
+                        width=150
+                    ),
+                    pn.indicators.LoadingSpinner(value=self.vm.param.progress_active, width=30, height=30, align='center')
+                ),
                 progress_bar,
                 pn.Param(self.vm.param.status_message, widgets={'status_message': {'type': pn.widgets.StaticText, 'styles': {'color': 'black', 'font-weight': 'bold'}}}),
             ),
